@@ -31,6 +31,7 @@ from shake_movie.sw4_images import (
     find_images,
     parse_sw4_input,
     read_image,
+    read_image_shape,
 )
 
 app = typer.Typer(add_completion=False)
@@ -54,6 +55,23 @@ def _images(
     """Find the surface images SW4 wrote for a mode."""
     prefix = _image_prefix(commands, mode)
     return [] if prefix is None else find_images(directory, prefix, mode)
+
+
+def _matching(paths: list[Path], shape: tuple[int, int]) -> list[Path]:
+    """Keep the images on a grid of the given shape.
+
+    A retried SW4 run on a resized domain leaves the earlier attempt's images
+    behind, at cycles the retry doesn't overwrite when its time step differs.
+    """
+    kept = [path for path in paths if read_image_shape(path) == shape]
+    if len(kept) < len(paths):
+        logger.warning(
+            "Skipping %d images that don't match the %d x %d terrain,"
+            " left by another SW4 run",
+            len(paths) - len(kept),
+            *shape,
+        )
+    return kept
 
 
 def _coastline(given: Path | None, realisation: Realisation) -> Path:
@@ -173,8 +191,9 @@ def plan_movie(
     geometry = GridGeometry.from_grid_command(commands["grid"][0])
     directory = images or Path(commands["fileio"][0]["path"])
     topo = _images(commands, directory, "topo")
-    velocity = _images(commands, directory, "mag")
-    peak = _images(commands, directory, "hmax")
+    shape = read_image_shape(topo[0]) if topo else (0, 0)
+    velocity = _matching(_images(commands, directory, "mag"), shape)
+    peak = _matching(_images(commands, directory, "hmax"), shape)
     if not topo or len(velocity) < 2:
         raise typer.BadParameter(
             f"{directory} needs a surface `topo` image and a series of surface `mag` images."

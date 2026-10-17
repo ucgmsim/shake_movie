@@ -110,6 +110,23 @@ def read_image_time(path: Path) -> float:
         return float(handle["time"][0])
 
 
+def read_image_shape(path: Path) -> tuple[int, int]:
+    """Read only the shape of an SW4 image.
+
+    Parameters
+    ----------
+    path : Path
+        The `*.sw4img.h5` file.
+
+    Returns
+    -------
+    tuple[int, int]
+        The image's shape, `(ni, nj)`.
+    """
+    with h5py.File(path, "r") as handle:
+        return int(handle["ni"][0]), int(handle["nj"][0])
+
+
 def find_images(directory: Path, prefix: str, mode: str) -> list[Path]:
     """Find every image SW4 wrote for one `imagehdf5` command, in cycle order.
 
