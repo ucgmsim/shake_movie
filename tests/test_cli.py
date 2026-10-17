@@ -4,8 +4,10 @@ from pathlib import Path
 
 import fake_sw4
 import numpy as np
+import psutil
+import pytest
 
-from shake_movie import render
+from shake_movie import cli, render
 from shake_movie.cli import plan_movie
 
 
@@ -27,3 +29,23 @@ def test_images_from_another_run_are_skipped(sw4_run: dict[str, Path]) -> None:
     )
     assert len(plan.velocity) == 3
     assert not set(stale) & set(plan.velocity)
+
+
+@pytest.mark.parametrize(
+    ("affinity", "logical", "physical", "cores"),
+    [(32, 192, 96, 16), (16, 16, 16, 16), (1, 192, 96, 1)],
+)
+def test_workers_default_to_physical_cores(
+    monkeypatch: pytest.MonkeyPatch,
+    affinity: int,
+    logical: int,
+    physical: int,
+    cores: int,
+) -> None:
+    """A Slurm job's hyperthreads count once per core, and never as none."""
+    counts = {True: logical, False: physical}
+    monkeypatch.setattr(
+        psutil.Process, "cpu_affinity", lambda self: list(range(affinity))
+    )
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: counts[logical])
+    assert cli._cores() == cores
