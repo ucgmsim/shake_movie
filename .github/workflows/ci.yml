@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@v2
+    with:
+      python-version: "3.13"
+      # Mesa's EGL and llvmpipe let VTK render off-screen without a GPU, as on
+      # HPC nodes; ffmpeg encodes the movie. The render tests skip without them.
+      system-packages: "ffmpeg libegl1 libegl-mesa0 libgl1-mesa-dri libosmesa6"
+      uv-extra-args: "--all-extras --dev"
+      enable-coverage: true
+      cov-package: shake_movie
+      cov-fail-under: 90

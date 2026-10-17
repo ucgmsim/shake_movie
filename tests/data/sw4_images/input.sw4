@@ -1,0 +1,12 @@
+grid x=40000 y=50000 z=24000 h=1000 lat=-43.5 lon=172.5 az=30 proj=tmerc ellps=GRS80 lon_p=173 lat_p=0 scale=0.9996
+time t=4
+supergrid gp=10
+topography input=gaussian zmax=9000 order=3 gaussianAmp=1000 gaussianXc=14000 gaussianYc=33000 gaussianLx=2000 gaussianLy=2000
+block vp=4000 vs=2000 rho=2500
+source x=22000 y=17000 z=3000 m0=1e15 mxx=1 myy=1 mzz=1 type=Gaussian t0=0.8 freq=4
+imagehdf5 mode=topo z=0 file=topo cycle=0 precision=float
+imagehdf5 mode=grid z=0 file=grid cycle=0 precision=float
+imagehdf5 mode=lat z=0 file=lat cycle=0
+imagehdf5 mode=lon z=0 file=lon cycle=0
+imagehdf5 mode=mag z=0 file=surf_mag timeInterval=1 precision=float
+imagehdf5 mode=hmax z=0 file=surf_hmax precision=float time=4

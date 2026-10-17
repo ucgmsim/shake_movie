@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shake-movie"
+dynamic = ["version"]
+description = "Public-facing earthquake videos from SW4 ground-motion simulations"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ucgmsim" }]
+requires-python = ">=3.13"
+dependencies = [
+  "h5py>=3.12",
+  "matplotlib>=3.10",
+  "numpy>=2",
+  "parse>=1.20",
+  "pyproj>=3.7",
+  "pyvista>=0.46",
+  "scipy>=1.15",
+  "shapely>=2.1",
+  "typer>=0.15",
+  "tzdata",
+]
+
+[project.urls]
+Homepage = "https://github.com/ucgmsim/shake_movie"
+Source = "https://github.com/ucgmsim/shake_movie"
+Issues = "https://github.com/ucgmsim/shake_movie/issues"
+
+[project.scripts]
+shake-movie = "shake_movie.cli:app"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-cov>=5"]
+
+[dependency-groups]
+dev = ["deptry", "ruff", "ty", "numpydoc"]
+
+# The version is the latest git tag, with the commits since it appended. A
+# source tree without git metadata falls back to 0.0.0 rather than failing.
+[tool.setuptools_scm]
+fallback_version = "0.0.0"
+
+[tool.setuptools.packages]
+find = { include = ["shake_movie*"] }
+
+[tool.setuptools.package-data]
+shake_movie = ["nz_places.csv"]
+
+[tool.deptry]
+optional_dependencies_dev_groups = ["test"]
+
+[tool.deptry.per_rule_ignores]
+# zoneinfo reads New Zealand time from tzdata where the system has no zone files.
+DEP002 = ["tzdata"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["render: renders with VTK, so needs an OpenGL (EGL or OSMesa) driver."]
+
+[tool.ruff.lint]
+extend-select = [
+  "I",      # isort imports
+  "W605",   # Use r'\s+' rather than '\s+'
+  "N",      # Naming conventions
+  "D101",   # Missing docstrings in classes, methods and functions
+  "D102",
+  "D103",
+  "D105",
+  "D107",
+  "UP032",  # Use f-strings
+  "UP035",  # Deprecated standard library imports
+  "ANN001", # Missing annotations
+  "ANN002",
+  "ANN003",
+  "ANN201",
+  "ANN202",
+  "ANN204",
+  "ANN205",
+  "ANN206",
+  "BLE001", # Bare except
+]
+ignore = ["D104"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shake_movie"]
+
+[tool.npdlint]
+include = ["shake_movie"]
+select = ["ALL"]
+ignore = ["ES01", "SA01", "EX01"]
+# Private helpers (a leading underscore) are documented by a one-line summary,
+# and constructors' parameters are documented on their class.
+exclude-object-patterns = ['\._[a-z]\w*$', '\.__init__$']
