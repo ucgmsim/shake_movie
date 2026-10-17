@@ -15,12 +15,12 @@ upload.
 import dataclasses
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Annotated
 
 import numpy as np
 import numpy.typing as npt
+import psutil
 import typer
 
 from shake_movie import camera, naming, palette, render, scene
@@ -72,6 +72,19 @@ def _matching(paths: list[Path], shape: tuple[int, int]) -> list[Path]:
             *shape,
         )
     return kept
+
+
+def _cores() -> int:
+    """Count the physical cores this process may run on.
+
+    The affinity mask lists logical CPUs, so on a node with hyperthreading a
+    Slurm job asking for 16 cores sees 32. Each worker holds its own scene,
+    renderer and encoder, so running one per hyperthread doubles the memory
+    for little speed.
+    """
+    logical = psutil.cpu_count(logical=True) or 1
+    physical = psutil.cpu_count(logical=False) or logical
+    return max(1, len(psutil.Process().cpu_affinity()) * physical // logical)
 
 
 def _coastline(given: Path | None, realisation: Realisation) -> Path:
@@ -280,7 +293,9 @@ def main(
     ] = None,
     workers: Annotated[
         int | None,
-        typer.Option(help="Worker processes. Defaults to the CPUs available."),
+        typer.Option(
+            help="Worker processes. Defaults to the physical cores available."
+        ),
     ] = None,
     width: Annotated[int, typer.Option(help="Frame width.")] = 1920,
     height: Annotated[int, typer.Option(help="Frame height.")] = 1080,
@@ -307,7 +322,7 @@ def main(
     coastline : Path | None
         Land polygons; defaults to the velocity model's, else LINZ's.
     workers : int | None
-        Worker processes; defaults to the CPUs available.
+        Worker processes; defaults to the physical cores available.
     width : int
         Frame width.
     height : int
@@ -323,7 +338,7 @@ def main(
         sw4_input, realisation, settings, images, srf, coastline, online=not offline
     )
     output = output or Path(f"{plan.realisation.name}.mp4")
-    count = workers or len(os.sched_getaffinity(0))
+    count = workers or _cores()
     logger.info("Rendering %d frames on %d workers", len(plan.frames), count)
     render.render_movie(
         plan.scene,
