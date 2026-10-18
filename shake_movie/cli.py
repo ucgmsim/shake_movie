@@ -1,12 +1,19 @@
 """Render a shake movie from a finished SW4 run.
 
-Run it as `shake-movie SW4_INPUT REALISATION [--output MOVIE.mp4]`.
+Run it as `shake-movie SW4_INPUT REALISATION [--intensity-measures
+intensity_measures.h5] [--output MOVIE.mp4]`.
 Everything else is read from the SW4 input file: where SW4 wrote its images
 (`fileio`), which `imagehdf5` commands hold the terrain (`topo`), the ground
 velocity (`mag`, every 0.5 s in the workflow's defaults) and its peak
 (`hmax`), and the SRF it ran (`rupturehdf5`). SW4 driven by an SRF slip
 *rate* outputs velocity where its modes say displacement, so `mag` is ground
 velocity and `hmax` peak horizontal ground velocity.
+
+The waves are drawn relative to the event's strongest ground velocity. The
+final map is absolute intensity from the workflow's broadband intensity
+measures (`--intensity-measures`, `im-calc`'s `intensity_measures.h5`).
+Without them it falls back to SW4's low-frequency motion, which underestimates
+how strongly smaller earthquakes are felt.
 
 Next to the movie, a JSON file records its title, place and date for the
 upload.
@@ -23,7 +30,7 @@ import numpy.typing as npt
 import psutil
 import typer
 
-from shake_movie import camera, naming, palette, render, scene
+from shake_movie import camera, intensity_measures, naming, palette, render, scene
 from shake_movie.realisation import Realisation
 from shake_movie.sw4_images import (
     GridGeometry,
@@ -121,6 +128,59 @@ def _town_words(
     return words
 
 
+def end_card(
+    shake_scene: scene.Scene,
+    geometry: GridGeometry,
+    spacing: float,
+    strongest: npt.NDArray[np.float32],
+    measures: Path | None,
+) -> render.EndCard:
+    """Work out the final map of the strongest shaking.
+
+    Parameters
+    ----------
+    shake_scene : scene.Scene
+        The scene.
+    geometry : GridGeometry
+        Where SW4's grid sits.
+    spacing : float
+        SW4 image spacing (m).
+    strongest : np.ndarray
+        SW4's strongest low-frequency ground velocity (m/s) on its image grid,
+        for when there are no broadband intensity measures.
+    measures : Path | None
+        The workflow's `intensity_measures.h5`, if it has one.
+
+    Returns
+    -------
+    render.EndCard
+        Absolute intensity at the shaking texture pixels, from broadband PGV
+        where given. Points beyond the stations' coverage show no shaking.
+    """
+    if measures is None:
+        logger.info(
+            "No intensity measures given: the final map shows SW4's"
+            " low-frequency motion, which underestimates smaller earthquakes"
+        )
+        stride = shake_scene.wave_stride
+        mmi = palette.pgv_to_mmi(strongest[::stride, ::stride] * render.CMS_PER_MS)
+        return render.EndCard(mmi, _town_words(shake_scene, geometry, spacing, mmi))
+    pgv = intensity_measures.interpolate_pgv(
+        intensity_measures.read_pgv(measures),
+        shake_scene.wave_easting,
+        shake_scene.wave_northing,
+    )
+    mmi = np.where(np.isfinite(pgv), palette.pgv_to_mmi(pgv), 1.0).astype(np.float32)
+    land = shake_scene.wave_opacity >= 1.0
+    peak = float(mmi[land].max()) if land.any() else 1.0
+    logger.info("Strongest broadband shaking on land: MMI %.1f", peak)
+    return render.EndCard(
+        mmi,
+        _town_words(shake_scene, geometry, spacing, mmi),
+        weak=palette.shaking_word(peak) is None,
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class MoviePlan:
     """Everything worked out before rendering."""
@@ -135,10 +195,10 @@ class MoviePlan:
     """Every frame of the movie."""
     velocity: list[Path]
     """`surf_mag` images (ground velocity)."""
-    peak_mmi: npt.NDArray[np.float32]
-    """Strongest shaking intensity at shaking texture pixels."""
-    words: dict[str, str | None]
-    """Strongest shaking at each town, in words."""
+    reference: float
+    """The event's strongest ground velocity (m/s), for the relative scale."""
+    end_card: render.EndCard
+    """The final map."""
 
     def metadata(self) -> dict[str, object]:
         """Describe the movie for its upload.
@@ -170,6 +230,7 @@ def plan_movie(
     srf: Path | None = None,
     coastline: Path | None = None,
     online: bool = True,
+    measures: Path | None = None,
 ) -> MoviePlan:
     """Read an SW4 run and work out the movie: scene, names and camera.
 
@@ -189,6 +250,8 @@ def plan_movie(
         Land polygons; defaults to the velocity model's, else LINZ's.
     online : bool
         Whether to ask GeoNet and Nominatim for the date and place.
+    measures : Path | None
+        The workflow's broadband `intensity_measures.h5`, for the final map.
 
     Returns
     -------
@@ -235,11 +298,17 @@ def plan_movie(
     logger.info("Planning the camera")
     sequence = ImageSequence(velocity)
     stride = shake_scene.wave_stride
+    moving = sequence.maximum()
+    inside = moving[::stride, ::stride][shake_scene.wave_inside]
+    reference = float(inside.max()) if inside.size else float(moving.max())
+    if not reference > 0:
+        reference = 1.0
+    logger.info("Strongest low-frequency ground velocity: %.3g cm/s", reference * 100)
 
     def _felt(time: float) -> npt.NDArray[np.float64]:
-        """NZTM points shaking at `camera.FELT_MMI` or above at a time."""
-        mmi = render.intensity(sequence, time, stride)
-        mask = (mmi >= camera.FELT_MMI) & shake_scene.wave_inside
+        """NZTM points moving at `camera.FELT_FRACTION` of the strongest or more."""
+        now = sequence.at(time)[::stride, ::stride]
+        mask = (now >= camera.FELT_FRACTION * reference) & shake_scene.wave_inside
         points = np.column_stack(
             [shake_scene.wave_easting[mask], shake_scene.wave_northing[mask]]
         )
@@ -256,10 +325,9 @@ def plan_movie(
     frames = camera.timeline(
         path, info.domain, sequence.end_time, settings.fps, settings.aspect
     )
-    strongest = read_image(peak[-1]).values if peak else sequence.maximum()
-    peak_mmi = palette.pgv_to_mmi(strongest[::stride, ::stride] * render.CMS_PER_MS)
-    words = _town_words(shake_scene, geometry, terrain.grid_size, peak_mmi)
-    return MoviePlan(info, name, shake_scene, frames, velocity, peak_mmi, words)
+    strongest = read_image(peak[-1]).values if peak else moving
+    card = end_card(shake_scene, geometry, terrain.grid_size, strongest, measures)
+    return MoviePlan(info, name, shake_scene, frames, velocity, reference, card)
 
 
 @app.command()
@@ -289,6 +357,15 @@ def main(
         Path | None,
         typer.Option(
             help="Land polygons (nzcvm .wkb.gz or GMT .gmt). Defaults to the velocity model's, else LINZ's."
+        ),
+    ] = None,
+    measures: Annotated[
+        Path | None,
+        typer.Option(
+            "--intensity-measures",
+            exists=True,
+            dir_okay=False,
+            help="The workflow's broadband intensity_measures.h5, for the final map. Without it, the map shows SW4's low-frequency motion.",
         ),
     ] = None,
     workers: Annotated[
@@ -321,6 +398,8 @@ def main(
         The SRF SW4 ran, if not its `rupturehdf5` file.
     coastline : Path | None
         Land polygons; defaults to the velocity model's, else LINZ's.
+    measures : Path | None
+        The workflow's broadband `intensity_measures.h5`, for the final map.
     workers : int | None
         Worker processes; defaults to the physical cores available.
     width : int
@@ -335,7 +414,14 @@ def main(
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     settings = render.Settings(width=width, height=height, fps=fps)
     plan = plan_movie(
-        sw4_input, realisation, settings, images, srf, coastline, online=not offline
+        sw4_input,
+        realisation,
+        settings,
+        images,
+        srf,
+        coastline,
+        online=not offline,
+        measures=measures,
     )
     output = output or Path(f"{plan.realisation.name}.mp4")
     count = workers or _cores()
@@ -344,8 +430,8 @@ def main(
         plan.scene,
         plan.frames,
         plan.velocity,
-        plan.peak_mmi,
-        plan.words,
+        plan.reference,
+        plan.end_card,
         settings,
         output,
         count,

@@ -1,10 +1,12 @@
 """Shared fixtures: a small SW4 run built around SW4's own output files."""
 
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import fake_sw4
 import numpy as np
+import numpy.typing as npt
 import pytest
 from pyproj import Transformer
 
@@ -38,6 +40,37 @@ def write_square_coastline(path: Path, geometry: GridGeometry) -> Path:
     ]
     path.write_text("\n".join(lines) + "\n")
     return path
+
+
+SPONGE = 6e3
+"""Width of the fake absorbing layer at the edge of the fixture grid (m)."""
+
+
+def write_measures(
+    path: Path,
+    geometry: GridGeometry,
+    pgv_at: Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], npt.NDArray],
+) -> Path:
+    """Write broadband PGV (cm/s) at stations every 2 km over the fixture grid.
+
+    `pgv_at` gives PGV from SW4 grid coordinates. Stations within `SPONGE` of
+    the grid's edge are marked as inside SW4's absorbing layer and given an
+    absurd PGV, so using them would show.
+    """
+    x, y = (
+        values.ravel()
+        for values in np.meshgrid(
+            np.arange(0.0, 40.1e3, 2e3), np.arange(0.0, 50.1e3, 2e3), indexing="ij"
+        )
+    )
+    lon, lat = np.transpose(
+        [_lon_lat(geometry, a, b) for a, b in zip(x, y, strict=True)]
+    )
+    sponge = (x < SPONGE) | (x > 40e3 - SPONGE) | (y < SPONGE) | (y > 50e3 - SPONGE)
+    pgv = np.where(sponge, 1e4, pgv_at(x, y))
+    return fake_sw4.write_intensity_measures(
+        path, lat, lon, pgv, np.where(sponge, 5.0, 0.0)
+    )
 
 
 @pytest.fixture
