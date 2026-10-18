@@ -162,4 +162,5 @@ def test_weak_event_end_card_says_so(
         image, plan.scene, final, [], [], np.full(2, np.nan), SETTINGS, True
     )
     assert render.WEAK_NOTE in texts
-    assert "Strongest shaking felt" not in texts and words <= set(texts)
+    assert "Strongest shaking felt" not in texts and not words & set(texts)
+    assert render.VELOCITY_TITLE in texts and "10" in texts

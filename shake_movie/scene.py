@@ -503,7 +503,8 @@ class Scene:
     """Static geometry and textures, prepared once and shared with workers."""
 
     mesh_easting: npt.NDArray[np.float64]
-    """NZTM easting of close-up mesh nodes, `(i, j)` along SW4's axes."""
+    """NZTM easting of close-up mesh nodes, `(i, j)` along SW4's axes, over the
+    simulated domain only."""
     mesh_northing: npt.NDArray[np.float64]
     """NZTM northing of close-up mesh nodes."""
     mesh_elevation: npt.NDArray[np.float32]
@@ -674,10 +675,13 @@ def build_scene(
     rgb = dim(rgb, (~_inside_domain(ti, tj)).astype(np.float32))
     terrain_texture = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
 
-    # Close-up mesh.
+    # Close-up mesh, over the simulated domain only: SW4's absorbing layer
+    # around it shows the flat context map beneath, like everything outside.
     m = _stride(max(ni, nj), spacing, MESH_SPACING, 10**9)
     mi = np.arange(0, ni, m)
     mj = np.arange(0, nj, m)
+    mi = mi[_inside_domain(mi, np.full_like(mi, nj // 2))]
+    mj = mj[_inside_domain(np.full_like(mj, ni // 2), mj)]
     mesh_i, mesh_j = np.meshgrid(mi, mj, indexing="ij")
     mesh_easting, mesh_northing = geometry.to_nztm(mesh_i * spacing, mesh_j * spacing)
     mesh_elevation = ndimage.map_coordinates(
@@ -739,8 +743,12 @@ def build_scene(
     cn = context_bounds[3] - (np.arange(rows) + 0.5) * CONTEXT_RESOLUTION
     context_e, context_n = np.meshgrid(ce, cn)
     gx, gy = geometry.from_nztm(context_e, context_n)
-    height = ndimage.map_coordinates(
-        ground, [gx / (spacing * t), gy / (spacing * t)], order=1, cval=0.0
+    height = np.where(
+        _inside_domain(gx / spacing, gy / spacing),
+        ndimage.map_coordinates(
+            ground, [gx / (spacing * t), gy / (spacing * t)], order=1, cval=0.0
+        ),
+        0.0,
     ).astype(np.float32)
     height_bounds = (float(ce[0]), float(cn[-1]), float(ce[-1]), float(cn[0]))
 

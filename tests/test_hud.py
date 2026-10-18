@@ -8,7 +8,7 @@ import pytest
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
-from shake_movie import render
+from shake_movie import palette, render
 from shake_movie.cli import plan_movie
 
 LONG_TITLE = "Wednesday 30th September Mw 4.0 earthquake"
@@ -47,3 +47,23 @@ def test_title_card_stays_on_screen(sw4_run: dict[str, Path]) -> None:
     # may touch the frame's left or right edge.
     edges = hud[:, [0, 1, -2, -1]].max(axis=2)
     assert edges.max() < 120
+
+
+def test_velocity_ticks_are_round_and_fit_the_bar() -> None:
+    """Ticks fall on 1, 2 and 5 of each decade inside the legend's span, and
+    thin out on a short bar while keeping the largest."""
+    low, high = palette.mmi_to_pgv(np.array(render.VELOCITY_RANGE))
+    wide = render.velocity_ticks(620.0, 14.0)
+    assert wide == [0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+    assert all(low <= v <= high for v in wide)
+    narrow = render.velocity_ticks(120.0, 14.0)
+    assert len(narrow) < len(wide) and narrow[-1] == wide[-1]
+    assert set(narrow) <= set(wide)
+
+
+def test_mmi_to_pgv_inverts_pgv_to_mmi() -> None:
+    """Velocities survive a round trip through intensity on both branches."""
+    pgv = np.array([0.05, 0.5, 3.0, 20.0, 80.0])
+    np.testing.assert_allclose(
+        palette.mmi_to_pgv(palette.pgv_to_mmi(pgv)), pgv, rtol=1e-4
+    )

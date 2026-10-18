@@ -215,6 +215,26 @@ def pgv_to_mmi(pgv: npt.ArrayLike) -> npt.NDArray[np.float32]:
     return np.clip(mmi, 1.0, 10.0).astype(np.float32)
 
 
+def mmi_to_pgv(mmi: npt.ArrayLike) -> npt.NDArray[np.float64]:
+    """Convert intensity back to peak ground velocity, inverting `pgv_to_mmi`.
+
+    Parameters
+    ----------
+    mmi : array-like
+        Modified Mercalli intensity, within [1, 10].
+
+    Returns
+    -------
+    np.ndarray
+        Peak ground velocity (cm/s).
+    """
+    mmi = np.asarray(mmi, dtype=np.float64)
+    log_pgv = np.where(
+        mmi <= 3.78 + 1.47 * 0.53, (mmi - 3.78) / 1.47, (mmi - 2.89) / 3.16
+    )
+    return 10.0**log_pgv
+
+
 def shaking_word(mmi: float) -> str | None:
     """Name the shaking at an intensity in GeoNet's public words.
 

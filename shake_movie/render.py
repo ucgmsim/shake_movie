@@ -70,6 +70,16 @@ WEAK_NOTE = "Strongest shaking: too weak for most people to notice"
 "Strongest shaking felt"."""
 EPICENTRE_COLOUR = "#ffcc1a"
 """Fill of the star marking the epicentre."""
+VELOCITY_TITLE = "Ground velocity (cm/s)"
+"""Heading of the final map's legend."""
+VELOCITY_RANGE = (3.0, 9.0)
+"""Intensities (MMI) the final map's legend spans, labelled as velocities."""
+DIGIT_WIDTH = 0.6
+"""Width of a digit as a fraction of its font size, for spacing tick labels."""
+TICK_GAP = 8.0
+"""Gap (points) two neighbouring tick labels need to read as two."""
+SKIRT = "#2c3236"
+"""Colour of the wall dropping from the domain's edge to the map beneath."""
 
 FONT = "DejaVu Sans"
 HALO = [patheffects.withStroke(linewidth=3.2, foreground="#1a1a1a")]
@@ -619,15 +629,55 @@ def _heading(frame: Frame) -> float:
     return frame.shot.heading
 
 
+def velocity_ticks(width: float, fontsize: float) -> list[float]:
+    """Pick round velocities (cm/s) to label the final map's legend with.
+
+    Boundaries at 1, 2 and 5 of every decade the legend spans, thinned to as
+    many as the bar can carry without their labels touching, measuring the
+    widest label rather than assuming a count, and always keeping the largest
+    (eqvis_workflow's colour bar ticks).
+
+    Parameters
+    ----------
+    width : float
+        Length of the bar (points).
+    fontsize : float
+        Size of the tick labels (points).
+
+    Returns
+    -------
+    list[float]
+        Velocities to label, ascending.
+    """
+    low, high = palette.mmi_to_pgv(np.array(VELOCITY_RANGE))
+    decades = np.arange(np.floor(np.log10(low)), np.ceil(np.log10(high)) + 1)
+    boundaries = [
+        float(f * 10**d)
+        for d in decades
+        for f in (1.0, 2.0, 5.0)
+        if low <= f * 10**d <= high
+    ]
+    per_tick = max(len(f"{b:g}") for b in boundaries) * DIGIT_WIDTH * fontsize
+    room = max(2, int(width / (per_tick + TICK_GAP)))
+    count = len(boundaries)
+    stride = max(1, -(-(count - 1) // max(1, room - 1)))
+    kept = list(range(0, count, stride))
+    if kept[-1] != count - 1:
+        if len(kept) > 1 and (count - 1) - kept[-1] < stride:
+            kept.pop()
+        kept.append(count - 1)
+    return [boundaries[i] for i in kept]
+
+
 def _legend(ax: Axes, scene: Scene, s: float, h: float, relative: bool) -> None:
-    """Draw the shaking scale, relative or in words, and the fault key."""
+    """Draw the shaking scale, relative or in ground velocity, and the fault key."""
     x0, y0, width, height = 48 * s, h - 92 * s, 620 * s, 18 * s
     if relative:
         positions = np.linspace(*palette.RELATIVE_RAMP, 512)
         title = RELATIVE_TITLE
     else:
-        positions = np.linspace(3.0, 9.0, 512)
-        title = "Shaking"
+        positions = np.linspace(*VELOCITY_RANGE, 512)
+        title = VELOCITY_TITLE
     low, high = palette.MMI_RANGE
     colours = palette.shaking_cmap()((positions - low) / (high - low))
     colours[..., 3] = np.maximum(colours[..., 3], 0.35)
@@ -643,10 +693,19 @@ def _legend(ax: Axes, scene: Scene, s: float, h: float, relative: bool) -> None:
             (x0 + width, RELATIVE_ENDS[1], "right"),
         ]
     else:
-        ticks = [
-            (x0 + (start + 0.5 - 3.0) / 6.0 * width, word, "center")
-            for start, word in palette.SHAKING_WORDS
-        ]
+        low, high = VELOCITY_RANGE
+        ticks = []
+        for velocity in velocity_ticks(width, 14 * s):
+            x = x0 + (float(palette.pgv_to_mmi(velocity)) - low) / (high - low) * width
+            ax.plot(
+                [x, x],
+                [y0 + height, y0 + height + 6 * s],
+                color="white",
+                lw=1.2 * s,
+                solid_capstyle="butt",
+                zorder=9,
+            )
+            ticks.append((x, f"{velocity:g}", "center"))
     for x, word, align in ticks:
         ax.text(
             x,
@@ -726,6 +785,11 @@ def _north_arrow(ax: Axes, rotation: float, s: float, w: float, h: float) -> Non
 # ------------------------------------------------------------------ renderer
 
 
+def _ring(grid: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Walk a 2-D grid's edge once round, closing the loop."""
+    return np.concatenate([grid[0, :], grid[1:, -1], grid[-1, -2::-1], grid[-2::-1, 0]])
+
+
 class Renderer:
     """An off-screen VTK window showing the scene.
 
@@ -756,10 +820,11 @@ class Renderer:
         plotter.add_light(light)
 
         min_e, min_n, max_e, max_n = scene.context_bounds
+        floor = -30.0 * ex
         context = pv.StructuredGrid(
             np.array([[min_e, max_e], [min_e, max_e]]),
             np.array([[max_n, max_n], [min_n, min_n]]),
-            np.full((2, 2), -30.0 * ex),
+            np.full((2, 2), floor),
         )
         context.active_texture_coordinates = np.array(
             [[0, 1], [0, 0], [1, 1], [1, 0]], dtype=float
@@ -775,6 +840,7 @@ class Renderer:
         rows, columns = scene.wave_opacity.shape
         stride = scene.wave_stride
         self.levels = []
+        self.skirts = []
         for step in (1, 2):
             e = scene.mesh_easting[::step, ::step]
             n = scene.mesh_northing[::step, ::step]
@@ -799,6 +865,17 @@ class Renderer:
                 smooth_shading=True,
             )
             self.levels.append((base_actor, over_actor))
+            # The domain's terrain stands on the flat map; a wall closes the
+            # gap beneath its edge when the camera looks across it.
+            ring = _ring(e), _ring(n), _ring(z)
+            skirt = pv.StructuredGrid(
+                np.stack([ring[0]] * 2, axis=1),
+                np.stack([ring[1]] * 2, axis=1),
+                np.stack([ring[2], np.full_like(ring[2], floor)], axis=1),
+            )
+            self.skirts.append(
+                plotter.add_mesh(skirt, color=SKIRT, ambient=1.0, diffuse=0.0)
+            )
         self.plotter = plotter
         self.lut = palette.shaking_lut()
 
@@ -858,6 +935,7 @@ class Renderer:
         for level, (base, over) in enumerate(self.levels):
             base.visibility = level == far
             over.visibility = level == far and shaking is not None
+            self.skirts[level].visibility = level == far
         if shaking is not None:
             self.levels[far][1].texture = self._texture(shaking)
         position, focal_point, up = camera_pose(

@@ -64,10 +64,16 @@ rounding (under 1 m).
   "Weaker" to "Strongest".
 - **Fault:** drawn grey, turning white as it ruptures ("Fault rupturing").
 - **Ending:** a north-up map of the strongest shaking as absolute intensity,
-  in stepped bands named in GeoNet's public words (Weak, Light, Moderate,
-  Strong, Severe, Extreme), with the word for each town's shaking printed
-  under its name. When nothing on land reaches "Weak", the map says
-  "Strongest shaking: too weak for most people to notice".
+  in stepped bands, with the word for each town's shaking (GeoNet's Weak,
+  Light, Moderate, Strong, Severe, Extreme) printed under its name. The
+  legend reads "Ground velocity (cm/s)", ticked at round velocities (1, 2
+  and 5 of each decade, thinned to fit the bar) where intensity turns into
+  peak ground velocity by Worden et al. (2012). When nothing on land reaches
+  "Weak", the map says "Strongest shaking: too weak for most people to
+  notice".
+- **Domain edge:** only the simulated domain is drawn in relief; SW4's
+  absorbing layer around it is the same flat, greyed map as everything
+  outside, with a dark wall closing the gap under the domain's edge.
 
 ## Camera
 

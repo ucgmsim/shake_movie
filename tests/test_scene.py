@@ -115,6 +115,9 @@ def test_scene_on_sw4_output(sw4_run: dict[str, Path], geometry: GridGeometry) -
     assert built.terrain_texture.shape == (*topo.values.shape, 3)
     # The domain covers x 10-30 km, y 10-40 km of the 1 km grid.
     assert built.wave_inside.sum() == 21 * 31
+    # Relief is drawn over the domain only; the absorbing layer is flat map.
+    i, j = built.mesh_index
+    assert i.min() >= 10 and i.max() <= 30 and j.min() >= 10 and j.max() <= 40
     hill_e, hill_n = geometry.to_nztm(14e3, 33e3)
     # Draping heights are resampled at 500 m, which rounds off the 2 km wide peak.
     assert built.height_at(hill_e, hill_n) == pytest.approx(1000.0, rel=0.15)
