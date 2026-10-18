@@ -64,12 +64,11 @@ RELATIVE_TITLE = "Ground motion, relative to the strongest"
 """Heading of the waves' legend."""
 RELATIVE_ENDS = ("Weaker", "Strongest")
 """Labels at the ends of the waves' legend."""
-WEAK_NOTE = (
-    "Strongest shaking: too weak for most people to notice",
-    'Nowhere on land reached "Weak" on the scale below',
-)
+WEAK_NOTE = "Strongest shaking: too weak for most people to notice"
 """Shown on a final map where no shaking on land reaches a word, in place of
 "Strongest shaking felt"."""
+EPICENTRE_COLOUR = "#ffcc1a"
+"""Fill of the star marking the epicentre."""
 
 FONT = "DejaVu Sans"
 HALO = [patheffects.withStroke(linewidth=3.2, foreground="#1a1a1a")]
@@ -443,7 +442,7 @@ def draw_hud(
             *epicentre,
             marker="*",
             ms=26 * s,
-            mfc="white",
+            mfc=EPICENTRE_COLOUR,
             mec="#1a1a1a",
             mew=1.6 * s,
             zorder=5,
@@ -549,7 +548,7 @@ def draw_hud(
         if frame.peak < 1.0:
             status = f"{frame.time:.0f} seconds after it began"
         else:
-            status = WEAK_NOTE[0] if weak else "Strongest shaking felt"
+            status = WEAK_NOTE if weak else "Strongest shaking felt"
         ax.text(
             50 * s,
             150 * s,
@@ -560,18 +559,6 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
-        if weak and frame.peak >= 1.0:
-            # Town labels stay below this line, so the note never covers one.
-            ax.text(
-                50 * s,
-                181 * s,
-                WEAK_NOTE[1],
-                color="#e9e6df",
-                fontsize=15 * s,
-                va="center",
-                family=FONT,
-                path_effects=HALO,
-            )
         _legend(ax, scene, s, h, relative=frame.peak < LEGEND_SWITCH)
     _north_arrow(ax, -_heading(frame), s, w, h)
     ax.text(

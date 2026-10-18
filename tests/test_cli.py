@@ -161,5 +161,5 @@ def test_weak_event_end_card_says_so(
     render.draw_hud(
         image, plan.scene, final, [], [], np.full(2, np.nan), SETTINGS, True
     )
-    assert set(render.WEAK_NOTE) <= set(texts)
+    assert render.WEAK_NOTE in texts
     assert "Strongest shaking felt" not in texts and words <= set(texts)
