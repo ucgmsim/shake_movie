@@ -9,10 +9,12 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import write_measures
 from typer.testing import CliRunner
 
 from shake_movie import camera, render
 from shake_movie.cli import app
+from shake_movie.sw4_images import GridGeometry
 
 
 def _can_render() -> bool:
@@ -72,9 +74,15 @@ def test_projection_matches_vtk() -> None:
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
-def test_cli_renders_a_movie(sw4_run: dict[str, Path], tmp_path: Path) -> None:
-    """A small movie renders end to end from SW4's own output files."""
+def test_cli_renders_a_movie(
+    sw4_run: dict[str, Path], geometry: GridGeometry, tmp_path: Path
+) -> None:
+    """A small movie renders end to end from SW4's own output files and the
+    broadband intensity measures."""
     output = tmp_path / "movie.mp4"
+    measures = write_measures(
+        tmp_path / "im.h5", geometry, lambda x, y: 10.0 ** (1 - x / 20e3)
+    )
     result = CliRunner().invoke(
         app,
         [
@@ -91,6 +99,8 @@ def test_cli_renders_a_movie(sw4_run: dict[str, Path], tmp_path: Path) -> None:
             "--workers",
             "2",
             "--offline",
+            "--intensity-measures",
+            str(measures),
         ],
     )
     assert result.exit_code == 0, result.output
@@ -146,8 +156,8 @@ def test_segment_renders_in_process(sw4_run: dict[str, Path], tmp_path: Path) ->
         0,
         len(frames),
         plan.velocity,
-        plan.peak_mmi,
-        plan.words,
+        plan.reference,
+        plan.end_card,
         settings,
         tmp_path / "segment.mp4",
     )

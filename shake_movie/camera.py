@@ -4,8 +4,9 @@ Every shot comes from the rupture and the shaking; nothing is set per event:
 
 1. Heading: look across the fault from the side where more people live, so
    towns sit in the foreground, keeping north within 60 degrees of screen-up.
-2. Framing: the part of the fault that has ruptured, plus everywhere shaking at
-   "Light" or above, padded by 30% and at least `MIN_WIDTH` across.
+2. Framing: the part of the fault that has ruptured, plus everywhere moving at
+   a tenth or more of the event's strongest ground velocity (the waves as
+   they are drawn), padded by 30% and at least `MIN_WIDTH` across.
 3. The camera only ever pulls back: the framed size is a running maximum.
 4. The path is smoothed with look-ahead (the movie is rendered after the
    run), then evaluated at every frame through monotone splines, so the
@@ -40,8 +41,9 @@ HEADING_DRIFT = 12.0
 """Total slow turn of the camera over the simulation, for parallax (degrees)."""
 MAX_NORTH_OFFSET = 60.0
 """Furthest north may turn from screen-up (degrees)."""
-FELT_MMI = 4.0
-"""Shaking framed by the camera: "Light" and above."""
+FELT_FRACTION = 0.1
+"""Waves framed by the camera: at least this fraction of the event's strongest
+ground velocity, so the camera follows the waves whatever the event's size."""
 PLAN_INTERVAL = 0.5
 """Spacing of the samples the camera path is planned from (s)."""
 
@@ -285,7 +287,8 @@ def plan_camera(
     towns : list[Town]
         Candidate towns, for the heading.
     felt : Callable[[float], np.ndarray]
-        NZTM points shaking at `FELT_MMI` or above at a time, `(n, 2)`.
+        NZTM points moving at `FELT_FRACTION` of the strongest ground velocity
+        or more at a time, `(n, 2)`.
     end_time : float
         End of the simulation (s).
     aspect : float

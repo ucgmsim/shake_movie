@@ -3,8 +3,14 @@
 Land is tinted by elevation from a lowland green that never turns blue, so
 low-lying land never reads as sea; where the sea is comes from the coastline,
 not from elevation. Shaking uses warm colours only (so it cannot be mistaken
-for water) and is see-through below "Weak", so weak shaking leaves the map
+for water) and is see-through at its low end, so weak shaking leaves the map
 readable.
+
+The ramp is used two ways. While the waves travel, it shows ground velocity
+relative to the event's own strongest (`relative_shaking`), so the waves show
+for every size of event: SW4's low-frequency motion from a Mw 4 is far too
+weak to colour on an absolute scale. The final map shows absolute intensity
+(MMI) in GeoNet's public words.
 """
 
 import numpy as np
@@ -49,6 +55,14 @@ SHAKING_STOPS = [
 
 MMI_RANGE = (2.0, 10.0)
 """Intensities spanned by the shaking colour map."""
+
+RELATIVE_DECADES = 2.0
+"""Ground velocities spanned by the relative scale: from the event's strongest
+down to a hundredth of it."""
+
+RELATIVE_RAMP = (3.2, 7.5)
+"""Where the relative scale sits on the shaking ramp (MMI): a hundredth of the
+strongest is see-through, the strongest a deep red."""
 
 SEA_SHAKING_OPACITY = 0.3
 """Shaking over the sea means little to viewers; it is drawn faintly there."""
@@ -110,6 +124,77 @@ def shaking_lut(size: int = 256) -> npt.NDArray[np.uint8]:
         RGBA lookup table, shape `(size, 4)`.
     """
     return (shaking_cmap()(np.linspace(0.0, 1.0, size)) * 255).astype(np.uint8)
+
+
+def shaking_rgba(
+    mmi: npt.NDArray[np.float32], lut: npt.NDArray[np.uint8] | None = None
+) -> npt.NDArray[np.uint8]:
+    """Colour positions on the shaking ramp.
+
+    Parameters
+    ----------
+    mmi : np.ndarray
+        Positions on the ramp, in MMI (see `MMI_RANGE`).
+    lut : np.ndarray | None
+        A table from `shaking_lut`, to reuse; built if not given.
+
+    Returns
+    -------
+    np.ndarray
+        RGBA bytes, shape `mmi.shape + (4,)`.
+    """
+    lut = shaking_lut() if lut is None else lut
+    low, high = MMI_RANGE
+    index = np.clip((mmi - low) / (high - low) * (len(lut) - 1), 0, len(lut) - 1)
+    return lut[index.astype(np.int32)]
+
+
+def relative_level(
+    velocity: npt.ArrayLike, reference: float
+) -> npt.NDArray[np.float32]:
+    """Measure ground velocity against the event's strongest, on a log scale.
+
+    Parameters
+    ----------
+    velocity : array-like
+        Ground velocity, in any unit.
+    reference : float
+        The event's strongest ground velocity, in the same unit.
+
+    Returns
+    -------
+    np.ndarray
+        0 at `RELATIVE_DECADES` below `reference` (or weaker), 1 at it.
+    """
+    ratio = np.maximum(np.asarray(velocity, dtype=np.float32), 1e-30) / max(
+        reference, 1e-30
+    )
+    return np.clip(1.0 + np.log10(ratio) / RELATIVE_DECADES, 0.0, 1.0).astype(
+        np.float32
+    )
+
+
+def relative_shaking(
+    velocity: npt.ArrayLike, reference: float
+) -> npt.NDArray[np.float32]:
+    """Place ground velocity on the shaking ramp relative to the strongest.
+
+    Parameters
+    ----------
+    velocity : array-like
+        Ground velocity, in any unit.
+    reference : float
+        The event's strongest ground velocity, in the same unit.
+
+    Returns
+    -------
+    np.ndarray
+        Positions on the shaking ramp (MMI units, see `RELATIVE_RAMP`). They
+        are not intensities: the same position means the same fraction of the
+        strongest, whatever the event's size.
+    """
+    low, high = RELATIVE_RAMP
+    return (low + (high - low) * relative_level(velocity, reference)).astype(np.float32)
 
 
 def pgv_to_mmi(pgv: npt.ArrayLike) -> npt.NDArray[np.float32]:

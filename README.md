@@ -6,7 +6,7 @@ QuakeCoRE's outreach channel. One command turns a finished SW4 run into a
 render, and later upload, a movie for every earthquake it simulates.
 
 ```
-shake-movie SW4_INPUT REALISATION [--output MOVIE.mp4]
+shake-movie SW4_INPUT REALISATION [--intensity-measures intensity_measures.h5] [--output MOVIE.mp4]
 ```
 
 Next to the movie it writes `MOVIE.json` with the title, place, date,
@@ -21,14 +21,23 @@ says where the rest is:
 |---|---|---|
 | `topo` image (z = 0, cycle 0) | SW4 `imagehdf5 mode=topo` | Terrain mesh and hillshade |
 | `surf_mag` images (z = 0, every 0.5 s) | SW4 `imagehdf5 mode=mag` | Shaking, interpolated in time to the frame rate |
-| `surf_hmax` image (z = 0, end) | SW4 `imagehdf5 mode=hmax` | Strongest shaking map |
+| `surf_hmax` image (z = 0, end) | SW4 `imagehdf5 mode=hmax` | Strongest shaking map, without intensity measures |
 | SRF (`rupturehdf5`) | the SRF SW4 ran | Fault trace, rupture timing, epicentre |
 | Realisation JSON | the workflow | Magnitude, simulated domain, coastline |
+| `intensity_measures.h5` (`--intensity-measures`) | the workflow's `im-calc` | Strongest shaking map (broadband PGV) |
 
 The workflow's defaults already write these images. SW4 driven by an SRF slip
 rate outputs velocity where its modes say displacement, so `mag` is ground
 velocity and `hmax` peak horizontal ground velocity. Velocity becomes
 intensity through Worden et al. (2012).
+
+The final map uses the broadband intensity measures when given: RotD50 PGV
+(`/PGV/rotd50`) at `im-calc`'s stations, the real ones plus its virtual grid,
+leaving out stations inside SW4's absorbing layer (`supergrid_depth_gp > 0`).
+PGV is interpolated linearly in its logarithm between stations, and nothing
+is drawn beyond them (outside their hull, or over 10 km from any). Without
+the file the map falls back to SW4's `hmax`, which is only the low-frequency
+motion and underestimates how strongly smaller earthquakes are felt.
 
 The grid is placed on the map exactly as SW4 places it: the PROJ string is
 rebuilt the way SW4 assembles it from the `grid` command. That includes
@@ -45,11 +54,20 @@ rounding (under 1 m).
   the Canterbury Plains. Lagoons such as Te Waihora are found as large 0 m
   patches inside the coastline.
 - **Shaking:** a warm-only ramp ("Ember") that cannot be mistaken for water,
-  see-through below "Weak" and faint over the sea. The legend uses GeoNet's
-  public words: Weak, Light, Moderate, Strong, Severe, Extreme.
+  see-through at its low end and faint over the sea.
+- **Waves:** coloured by ground velocity relative to the event's strongest
+  (the largest `mag` value inside the domain), on a log scale over two
+  decades: a hundredth of the strongest is see-through, the strongest deep
+  red. SW4's low-frequency motion from a Mw 4 peaks around 0.003 cm/s, far
+  below anything felt, so an absolute scale would show nothing for most
+  events. The legend says "Ground motion, relative to the strongest", from
+  "Weaker" to "Strongest".
 - **Fault:** drawn grey, turning white as it ruptures ("Fault rupturing").
-- **Ending:** a north-up map of the strongest shaking in stepped bands, with
-  the word for each town's shaking printed under its name.
+- **Ending:** a north-up map of the strongest shaking as absolute intensity,
+  in stepped bands named in GeoNet's public words (Weak, Light, Moderate,
+  Strong, Severe, Extreme), with the word for each town's shaking printed
+  under its name. When nothing on land reaches "Weak", the map says
+  "Strongest shaking: too weak for most people to notice".
 
 ## Camera
 
@@ -57,8 +75,9 @@ Every shot is worked out from the rupture and the shaking (`camera.py`):
 
 1. Look across the fault from the side where more people live, keeping north
    within 60 degrees of screen-up. Point sources look north.
-2. Frame the ruptured part of the fault plus everywhere shaking at "Light" or
-   above, padded 30%, at least 70 km across.
+2. Frame the ruptured part of the fault plus everywhere moving at a tenth or
+   more of the event's strongest ground velocity, padded 30%, at least 70 km
+   across.
 3. Only ever pull back: the framed size is a running maximum.
 4. Smooth the path with look-ahead, then evaluate it at every frame through
    monotone splines. The camera glides rather than stepping at SW4's image

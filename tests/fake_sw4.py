@@ -207,3 +207,54 @@ def write_sw4_input(
         )
     )
     return path
+
+
+def write_intensity_measures(
+    path: Path,
+    latitude: npt.NDArray[np.float64],
+    longitude: npt.NDArray[np.float64],
+    pgv: npt.NDArray[np.float64],
+    supergrid_depth_gp: npt.NDArray[np.float64],
+) -> Path:
+    """Write the PGV part of `im-calc`'s `intensity_measures.h5`.
+
+    As in the real file (xarray's netCDF4 layout), each intensity measure is
+    a group of 1-D datasets over the stations.
+
+    Parameters
+    ----------
+    path : Path
+        The file to write.
+    latitude : np.ndarray
+        Station latitudes.
+    longitude : np.ndarray
+        Station longitudes.
+    pgv : np.ndarray
+        RotD50 peak ground velocity at each station (cm/s).
+    supergrid_depth_gp : np.ndarray
+        Grid points each station sits inside SW4's absorbing layer.
+
+    Returns
+    -------
+    Path
+        The written file.
+    """
+    count = len(pgv)
+    with h5py.File(path, "w") as handle:
+        group = handle.create_group("PGV")
+        group.create_dataset(
+            "station", data=np.array([f"st{k:05d}" for k in range(count)], dtype="S")
+        )
+        for name, values in {
+            "rotd50": pgv,
+            "000": pgv * 1.1,
+            "090": pgv * 0.9,
+            "latitude": latitude,
+            "longitude": longitude,
+            "rrup": np.full(count, 10.0),
+        }.items():
+            group.create_dataset(name, data=np.asarray(values, dtype=np.float64))
+        group.create_dataset(
+            "supergrid_depth_gp", data=np.asarray(supergrid_depth_gp, dtype=np.float32)
+        )
+    return path

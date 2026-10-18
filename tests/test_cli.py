@@ -1,14 +1,23 @@
 """Tests for planning a movie from an SW4 run's output directory."""
 
+import logging
 from pathlib import Path
 
 import fake_sw4
 import numpy as np
+import numpy.typing as npt
 import psutil
 import pytest
+from conftest import write_measures
+from matplotlib.axes import Axes
+from matplotlib.text import Text
 
-from shake_movie import cli, render
+from shake_movie import cli, palette, render
 from shake_movie.cli import plan_movie
+from shake_movie.sw4_images import GridGeometry, ImageSequence, read_image
+
+SETTINGS = render.Settings(width=320, height=180, fps=4)
+"""The small frame the tests plan for."""
 
 
 def test_images_from_another_run_are_skipped(sw4_run: dict[str, Path]) -> None:
@@ -49,3 +58,108 @@ def test_workers_default_to_physical_cores(
     )
     monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: counts[logical])
     assert cli._cores() == cores
+
+
+def _plan(sw4_run: dict[str, Path], measures: Path | None = None) -> cli.MoviePlan:
+    """Plan the fixture run's movie, small and offline."""
+    return plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        SETTINGS,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+        measures=measures,
+    )
+
+
+def _texts(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every text the HUD draws."""
+    texts: list[str] = []
+    draw = Axes.text
+
+    def _record(self: Axes, x: float, y: float, s: str, *args, **kwargs) -> Text:  # noqa: ANN002, ANN003
+        """Note the text, then draw it."""
+        texts.append(s)
+        return draw(self, x, y, s, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "text", _record)
+    return texts
+
+
+def test_waves_are_relative_to_the_strongest(sw4_run: dict[str, Path]) -> None:
+    """The waves are scaled by the strongest ground velocity in the domain."""
+    plan = _plan(sw4_run)
+    stride = plan.scene.wave_stride
+    moving = ImageSequence(plan.velocity).maximum()[::stride, ::stride]
+    assert plan.reference == pytest.approx(float(moving[plan.scene.wave_inside].max()))
+
+
+def test_end_card_falls_back_to_low_frequency(
+    sw4_run: dict[str, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without intensity measures the final map is SW4's `hmax`, as before."""
+    with caplog.at_level(logging.INFO, logger="shake_movie"):
+        plan = _plan(sw4_run)
+    stride = plan.scene.wave_stride
+    (hmax,) = sw4_run["images"].glob("surf_hmax.*")
+    expected = palette.pgv_to_mmi(
+        read_image(hmax).values[::stride, ::stride] * render.CMS_PER_MS
+    )
+    np.testing.assert_array_equal(plan.end_card.mmi, expected)
+    assert not plan.end_card.weak
+    assert "low-frequency" in caplog.text
+
+
+def test_end_card_uses_broadband_pgv(
+    sw4_run: dict[str, Path], geometry: GridGeometry, tmp_path: Path
+) -> None:
+    """With intensity measures the final map is broadband intensity, and
+    shows nothing beyond the stations."""
+
+    def _pgv(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> npt.NDArray:
+        """Broadband PGV dying away from the source at (22, 17) km (cm/s)."""
+        return 20.0 * 10.0 ** (-np.hypot(x - 22e3, y - 17e3) / 20e3)
+
+    measures = write_measures(tmp_path / "im.h5", geometry, _pgv)
+    plan = _plan(sw4_run, measures)
+    mmi = plan.end_card.mmi
+    stride = plan.scene.wave_stride
+    near = (16 // stride, 17 // stride)
+    assert mmi[near] == pytest.approx(
+        float(palette.pgv_to_mmi(_pgv(np.array(16e3), np.array(17e3)))), abs=0.1
+    )
+    assert mmi[2 // stride, 25 // stride] == 1.0
+    assert not plan.end_card.weak
+
+
+def test_weak_event_end_card_says_so(
+    sw4_run: dict[str, Path],
+    geometry: GridGeometry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When no shaking on land reaches "Weak", the final map says why it is
+    empty; while the waves travel the legend is relative, without MMI words."""
+    measures = write_measures(
+        tmp_path / "im.h5", geometry, lambda x, y: np.full_like(x, 0.05)
+    )
+    plan = _plan(sw4_run, measures)
+    assert plan.end_card.weak
+    assert not any(plan.end_card.words.values())
+    texts = _texts(monkeypatch)
+    image = np.zeros((180, 320, 3), np.uint8)
+    final = plan.frames[-1]
+    middle = next(frame for frame in plan.frames if frame.kind == "simulation")
+    words = {word for _, word in palette.SHAKING_WORDS}
+    render.draw_hud(
+        image, plan.scene, middle, [], [], np.full(2, np.nan), SETTINGS, True
+    )
+    assert render.RELATIVE_TITLE in texts and not words & set(texts)
+    texts.clear()
+    render.draw_hud(
+        image, plan.scene, final, [], [], np.full(2, np.nan), SETTINGS, True
+    )
+    assert set(render.WEAK_NOTE) <= set(texts)
+    assert "Strongest shaking felt" not in texts and words <= set(texts)

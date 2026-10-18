@@ -7,6 +7,10 @@ on-screen text are drawn over the 3D frame with matplotlib, and frames are
 piped straight into ffmpeg, one segment per worker, then joined without
 re-encoding.
 
+While the waves travel they are coloured relative to the event's strongest
+ground velocity (`palette.relative_shaking`), so they show for every size of
+event; the final map is absolute intensity in GeoNet's words (`EndCard`).
+
 Without a GPU, VTK renders through Mesa (EGL or OSMesa, llvmpipe). Mesh size
 dominates that cost, so a coarser terrain mesh takes over once the camera is
 far out.
@@ -54,6 +58,18 @@ CREDITS = "Simulated with SW4  ·  Coastline: LINZ (CC BY)  ·  Places © OpenSt
 """Shown on the final map."""
 CMS_PER_MS = 100.0
 """SW4 velocities are m/s; intensities are computed from cm/s."""
+LEGEND_SWITCH = 0.5
+"""How far into the tilt up to the final map its legend replaces the waves'."""
+RELATIVE_TITLE = "Ground motion, relative to the strongest"
+"""Heading of the waves' legend."""
+RELATIVE_ENDS = ("Weaker", "Strongest")
+"""Labels at the ends of the waves' legend."""
+WEAK_NOTE = (
+    "Strongest shaking: too weak for most people to notice",
+    'Nowhere on land reached "Weak" on the scale below',
+)
+"""Shown on a final map where no shaking on land reaches a word, in place of
+"Strongest shaking felt"."""
 
 FONT = "DejaVu Sans"
 HALO = [patheffects.withStroke(linewidth=3.2, foreground="#1a1a1a")]
@@ -360,6 +376,7 @@ def draw_hud(
     fault: list[tuple[npt.NDArray[np.float64], str, float]],
     epicentre: npt.NDArray[np.float64],
     settings: Settings,
+    weak: bool = False,
 ) -> npt.NDArray[np.uint8]:
     """Draw labels, the fault and on-screen text over a rendered frame.
 
@@ -379,6 +396,8 @@ def draw_hud(
         Screen position of the epicentre.
     settings : Settings
         Frame size.
+    weak : bool
+        Whether the final map shows no shaking on land, and says so.
 
     Returns
     -------
@@ -527,11 +546,10 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
-        status = (
-            "Strongest shaking felt"
-            if frame.peak >= 1.0
-            else f"{frame.time:.0f} seconds after it began"
-        )
+        if frame.peak < 1.0:
+            status = f"{frame.time:.0f} seconds after it began"
+        else:
+            status = WEAK_NOTE[0] if weak else "Strongest shaking felt"
         ax.text(
             50 * s,
             150 * s,
@@ -542,7 +560,19 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
-        _legend(ax, scene, s, h)
+        if weak and frame.peak >= 1.0:
+            # Town labels stay below this line, so the note never covers one.
+            ax.text(
+                50 * s,
+                181 * s,
+                WEAK_NOTE[1],
+                color="#e9e6df",
+                fontsize=15 * s,
+                va="center",
+                family=FONT,
+                path_effects=HALO,
+            )
+        _legend(ax, scene, s, h, relative=frame.peak < LEGEND_SWITCH)
     _north_arrow(ax, -_heading(frame), s, w, h)
     ax.text(
         w - 48 * s,
@@ -576,12 +606,17 @@ def _heading(frame: Frame) -> float:
     return frame.shot.heading
 
 
-def _legend(ax: Axes, scene: Scene, s: float, h: float) -> None:
-    """Draw the shaking scale in words, and the fault key."""
+def _legend(ax: Axes, scene: Scene, s: float, h: float, relative: bool) -> None:
+    """Draw the shaking scale, relative or in words, and the fault key."""
     x0, y0, width, height = 48 * s, h - 92 * s, 620 * s, 18 * s
+    if relative:
+        positions = np.linspace(*palette.RELATIVE_RAMP, 512)
+        title = RELATIVE_TITLE
+    else:
+        positions = np.linspace(3.0, 9.0, 512)
+        title = "Shaking"
     low, high = palette.MMI_RANGE
-    mmi = np.linspace(3.0, 9.0, 512)
-    colours = palette.shaking_cmap()((mmi - low) / (high - low))
+    colours = palette.shaking_cmap()((positions - low) / (high - low))
     colours[..., 3] = np.maximum(colours[..., 3], 0.35)
     ax.imshow(
         colours[None], extent=(x0, x0 + width, y0 + height, y0), aspect="auto", zorder=8
@@ -589,15 +624,24 @@ def _legend(ax: Axes, scene: Scene, s: float, h: float) -> None:
     ax.add_patch(
         Rectangle((x0, y0), width, height, fill=False, ec="white", lw=1.2 * s, zorder=9)
     )
-    for start, word in palette.SHAKING_WORDS:
-        x = x0 + (start + 0.5 - 3.0) / 6.0 * width
+    if relative:
+        ticks = [
+            (x0, RELATIVE_ENDS[0], "left"),
+            (x0 + width, RELATIVE_ENDS[1], "right"),
+        ]
+    else:
+        ticks = [
+            (x0 + (start + 0.5 - 3.0) / 6.0 * width, word, "center")
+            for start, word in palette.SHAKING_WORDS
+        ]
+    for x, word, align in ticks:
         ax.text(
             x,
             y0 + height + 22 * s,
             word,
             color="white",
             fontsize=14 * s,
-            ha="center",
+            ha=align,
             va="center",
             family=FONT,
             path_effects=HALO,
@@ -605,7 +649,7 @@ def _legend(ax: Axes, scene: Scene, s: float, h: float) -> None:
     ax.text(
         x0,
         y0 - 18 * s,
-        "Shaking",
+        title,
         color="white",
         fontsize=15 * s,
         fontweight="bold",
@@ -614,9 +658,10 @@ def _legend(ax: Axes, scene: Scene, s: float, h: float) -> None:
         path_effects=HALO,
     )
     if not scene.rupture.is_point:
+        key_x, key_y = x0 + width + 40 * s, y0 + height / 2
         ax.plot(
-            [x0 + 150 * s, x0 + 190 * s],
-            [y0 - 18 * s] * 2,
+            [key_x, key_x + 40 * s],
+            [key_y] * 2,
             color="white",
             lw=4 * s,
             path_effects=[
@@ -624,8 +669,8 @@ def _legend(ax: Axes, scene: Scene, s: float, h: float) -> None:
             ],
         )
         ax.text(
-            x0 + 200 * s,
-            y0 - 18 * s,
+            key_x + 50 * s,
+            key_y,
             "Fault rupturing",
             color="white",
             fontsize=14 * s,
@@ -756,12 +801,13 @@ class Renderer:
     def shaking_texture(
         self, mmi: npt.NDArray[np.float32] | None, opacity: float
     ) -> npt.NDArray[np.uint8] | None:
-        """Colour an intensity image for the overlay.
+        """Colour the shaking for the overlay.
 
         Parameters
         ----------
         mmi : np.ndarray | None
-            Intensity at shaking texture pixels, or None for no shaking.
+            Positions on the shaking ramp (MMI units) at shaking texture
+            pixels, or None for no shaking.
         opacity : float
             Overall opacity.
 
@@ -772,11 +818,7 @@ class Renderer:
         """
         if mmi is None:
             return None
-        low, high = palette.MMI_RANGE
-        index = np.clip(
-            (mmi - low) / (high - low) * (len(self.lut) - 1), 0, len(self.lut) - 1
-        ).astype(np.int32)
-        rgba = self.lut[index].copy()
+        rgba = palette.shaking_rgba(mmi, self.lut)
         rgba[..., 3] = (rgba[..., 3] * self.scene.wave_opacity * opacity).astype(
             np.uint8
         )
@@ -834,6 +876,18 @@ class Renderer:
 
 
 @dataclasses.dataclass(frozen=True)
+class EndCard:
+    """The final map: the strongest shaking, as absolute intensity."""
+
+    mmi: npt.NDArray[np.float32]
+    """Strongest shaking intensity at shaking texture pixels."""
+    words: dict[str, str | None]
+    """Strongest shaking at each town, in words."""
+    weak: bool = False
+    """Whether no shaking on land reaches a word, so the map says so."""
+
+
+@dataclasses.dataclass(frozen=True)
 class Job:
     """One worker's share of the movie: a contiguous run of frames."""
 
@@ -847,20 +901,20 @@ class Job:
     """One past the last frame to encode."""
     velocity: list[Path]
     """`surf_mag` images (ground velocity magnitude)."""
-    peak_mmi: npt.NDArray[np.float32]
-    """Strongest shaking intensity at shaking texture pixels."""
-    words: dict[str, str | None]
-    """Strongest shaking at each town, in words."""
+    reference: float
+    """The event's strongest ground velocity (m/s), for the relative scale."""
+    end_card: EndCard
+    """The final map."""
     settings: Settings
     """How to render."""
     output: Path
     """Where to write this segment."""
 
 
-def intensity(
-    sequence: ImageSequence, time: float, stride: int
+def waves(
+    sequence: ImageSequence, time: float, stride: int, reference: float
 ) -> npt.NDArray[np.float32]:
-    """Intensity of the shaking at a time, at shaking texture resolution.
+    """The travelling waves at a time, relative to the event's strongest.
 
     Parameters
     ----------
@@ -870,13 +924,15 @@ def intensity(
         Simulation time (s).
     stride : int
         Image points per texture pixel.
+    reference : float
+        The event's strongest ground velocity (m/s).
 
     Returns
     -------
     np.ndarray
-        Modified Mercalli intensity.
+        Positions on the shaking ramp (see `palette.relative_shaking`).
     """
-    return palette.pgv_to_mmi(sequence.at(time)[::stride, ::stride] * CMS_PER_MS)
+    return palette.relative_shaking(sequence.at(time)[::stride, ::stride], reference)
 
 
 def fault_lines(
@@ -983,17 +1039,17 @@ def render_segment(job: Job) -> Path:
             projector,
             ex,
             MAX_FINAL_LABELS if final else MAX_LABELS,
-            job.words if final else None,
+            job.end_card.words if final else None,
         )
     for frame in job.frames[job.start : job.stop]:
         final = frame.peak >= 1.0
         if frame.kind in ("intro", "dive"):
             mmi = None
-        elif frame.peak > 0:
-            now = intensity(sequence, frame.time, scene.wave_stride)
-            mmi = now * (1 - frame.peak) + palette.banded(job.peak_mmi) * frame.peak
         else:
-            mmi = intensity(sequence, frame.time, scene.wave_stride)
+            mmi = waves(sequence, frame.time, scene.wave_stride, job.reference)
+            if frame.peak > 0:
+                strongest = palette.banded(job.end_card.mmi)
+                mmi = mmi * (1 - frame.peak) + strongest * frame.peak
         shaking = renderer.shaking_texture(mmi, FINAL_OPACITY if final else 1.0)
         image = renderer.render(frame.shot, shaking)
         projector = Projector(*camera_pose(scene, frame.shot, ex), settings)
@@ -1001,7 +1057,7 @@ def render_segment(job: Job) -> Path:
             projector,
             ex,
             MAX_FINAL_LABELS if final else MAX_LABELS,
-            job.words if final else None,
+            job.end_card.words if final else None,
         )
         fault = fault_lines(
             scene, projector, frame.time if frame.peak == 0 else np.inf, ex
@@ -1011,7 +1067,16 @@ def render_segment(job: Job) -> Path:
             np.array([[*scene.rupture.hypocentre, float(epicentre_z)]])
         )[0]
         encoder.stdin.write(
-            draw_hud(image, scene, frame, labels, fault, epicentre, settings).tobytes()
+            draw_hud(
+                image,
+                scene,
+                frame,
+                labels,
+                fault,
+                epicentre,
+                settings,
+                job.end_card.weak,
+            ).tobytes()
         )
     encoder.stdin.close()
     renderer.close()
@@ -1024,8 +1089,8 @@ def render_movie(
     scene: Scene,
     frames: list[Frame],
     velocity: list[Path],
-    peak_mmi: npt.NDArray[np.float32],
-    words: dict[str, str | None],
+    reference: float,
+    end_card: EndCard,
     settings: Settings,
     output: Path,
     workers: int,
@@ -1040,10 +1105,10 @@ def render_movie(
         Every frame of the movie.
     velocity : list[Path]
         `surf_mag` images.
-    peak_mmi : np.ndarray
-        Strongest shaking intensity at shaking texture pixels.
-    words : dict[str, str | None]
-        Strongest shaking at each town, in words.
+    reference : float
+        The event's strongest ground velocity (m/s), for the relative scale.
+    end_card : EndCard
+        The final map.
     settings : Settings
         How to render.
     output : Path
@@ -1068,8 +1133,8 @@ def render_movie(
                 int(a),
                 int(b),
                 velocity,
-                peak_mmi,
-                words,
+                reference,
+                end_card,
                 settings,
                 Path(directory) / f"segment{k:03d}.mp4",
             )

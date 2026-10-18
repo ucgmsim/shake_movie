@@ -43,3 +43,23 @@ def test_weak_shaking_is_see_through() -> None:
     index = int((3.0 - low) / (high - low) * (len(lut) - 1))
     assert lut[index, 3] == 0
     assert lut[-1, 3] == 255
+
+
+def test_relative_scale_shows_tiny_events() -> None:
+    """A Mw 4's low-frequency waves (around 0.003 cm/s at their strongest)
+    are as visible as a large earthquake's, and fade out two decades down."""
+    strongest = 3e-5
+    velocity = strongest * np.array([1.0, 0.3, 0.1, 0.03, 0.01, 0.001])
+    rgba = palette.shaking_rgba(palette.relative_shaking(velocity, strongest))
+    assert rgba[0, 3] > 230
+    assert np.all(rgba[:4, 3] > 0)
+    assert np.all(np.diff(rgba[:, 3].astype(int)) <= 0)
+    assert rgba[4, 3] == 0 and rgba[5, 3] == 0
+    large = palette.shaking_rgba(palette.relative_shaking(velocity * 1e5, 3.0))
+    np.testing.assert_array_equal(rgba, large)
+
+
+def test_relative_level_spans_two_decades() -> None:
+    """The strongest is 1, a hundredth of it 0, and a tenth halfway."""
+    level = palette.relative_level([2.0, 0.2, 0.02, 0.0], 2.0)
+    np.testing.assert_allclose(level, [1.0, 0.5, 0.0, 0.0], atol=1e-6)
