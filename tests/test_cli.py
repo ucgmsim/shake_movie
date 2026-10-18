@@ -129,8 +129,9 @@ def test_end_card_falls_back_to_low_frequency(
     stride = plan.scene.wave_stride
     (hmax,) = sw4_run["images"].glob("surf_hmax.*")
     expected = read_image(hmax).values[::stride, ::stride] * render.CMS_PER_MS
-    np.testing.assert_allclose(plan.end_card.pgv, expected, rtol=1e-6)
     land = plan.scene.wave_opacity >= 1.0
+    np.testing.assert_allclose(plan.end_card.pgv[land], expected[land], rtol=1e-6)
+    assert np.isnan(plan.end_card.pgv[~land]).all()
     assert plan.end_card.scale.high == pytest.approx(float(expected[land].max()))
     assert not plan.end_card.weak
     assert "low-frequency" in caplog.text
@@ -156,8 +157,9 @@ def test_end_card_uses_broadband_pgv(
         float(_pgv(np.array(16e3), np.array(17e3))), rel=0.2
     )
     assert np.isnan(pgv[2 // stride, 25 // stride])
-    land = (plan.scene.wave_opacity >= 1.0) & np.isfinite(pgv)
-    assert plan.end_card.scale.high == pytest.approx(float(pgv[land].max()))
+    sea = plan.scene.wave_opacity < 1.0
+    assert sea.any() and np.isnan(pgv[sea]).all()
+    assert plan.end_card.scale.high == pytest.approx(float(np.nanmax(pgv)))
     assert not plan.end_card.weak
 
 

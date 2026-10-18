@@ -156,9 +156,9 @@ def end_card(
     Returns
     -------
     render.EndCard
-        Peak ground velocity at the shaking texture pixels, broadband where
-        given (points beyond the stations' coverage show none), the colour
-        scale it tops out, and the words for each town.
+        Peak ground velocity at the shaking texture pixels on land (NaN at
+        sea and beyond the stations' coverage), broadband where given, the
+        colour scale it tops out, and the words for each town.
     """
     if measures is None:
         logger.info(
@@ -173,10 +173,10 @@ def end_card(
             shake_scene.wave_easting,
             shake_scene.wave_northing,
         ).astype(np.float32)
+    # The final map is of shaking on land: clip it to the coastline.
+    pgv = np.where(shake_scene.wave_opacity >= 1.0, pgv, np.nan).astype(np.float32)
     mmi = np.where(np.isfinite(pgv), palette.pgv_to_mmi(pgv), 1.0).astype(np.float32)
-    land = (shake_scene.wave_opacity >= 1.0) & np.isfinite(pgv)
-    inside = shake_scene.wave_inside & np.isfinite(pgv)
-    covered = land if land.any() else inside
+    covered = np.isfinite(pgv)
     peak = float(pgv[covered].max()) if covered.any() else 1.0
     if not peak > 0:
         peak = 1.0

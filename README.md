@@ -66,8 +66,9 @@ rounding (under 1 m).
   felt, so drawn as it is it would show nothing; scaled, the waves fill the
   same scale the final map is drawn on.
 - **Fault:** drawn grey, turning white as it ruptures ("Fault rupturing").
-- **Ending:** a north-up map of the strongest broadband shaking on the same
-  scale, with the word for each town's shaking (GeoNet's Weak, Light,
+- **Ending:** a north-up map of the strongest broadband shaking on land
+  (clipped to the coastline) on the same scale, with the word for each
+  town's shaking (GeoNet's Weak, Light,
   Moderate, Strong, Severe, Extreme, from intensity by Worden et al., 2012)
   printed under its name. When nothing on land reaches "Weak", the map says
   "Strongest shaking: too weak for most people to notice". Without
