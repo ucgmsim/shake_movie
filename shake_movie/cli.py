@@ -9,11 +9,13 @@ velocity (`mag`, every 0.5 s in the workflow's defaults) and its peak
 *rate* outputs velocity where its modes say displacement, so `mag` is ground
 velocity and `hmax` peak horizontal ground velocity.
 
-The waves are drawn relative to the event's strongest ground velocity. The
-final map is absolute intensity from the workflow's broadband intensity
-measures (`--intensity-measures`, `im-calc`'s `intensity_measures.h5`).
-Without them it falls back to SW4's low-frequency motion, which underestimates
-how strongly smaller earthquakes are felt.
+Shaking is drawn in ground velocity (cm/s) on one colour scale for the whole
+movie, topped by the strongest broadband shaking from the workflow's intensity
+measures (`--intensity-measures`, `im-calc`'s `intensity_measures.h5`). The
+final map is that broadband shaking, and the waves are SW4's low-frequency
+velocity scaled so their strongest reaches the same peak. Without the
+intensity measures, SW4's low-frequency motion stands in for the broadband,
+which underestimates how strongly smaller earthquakes are felt.
 
 Next to the movie, a JSON file records its title, place and date for the
 upload.
@@ -135,7 +137,7 @@ def end_card(
     strongest: npt.NDArray[np.float32],
     measures: Path | None,
 ) -> render.EndCard:
-    """Work out the final map of the strongest shaking.
+    """Work out the final map of the strongest shaking, and the colour scale.
 
     Parameters
     ----------
@@ -154,8 +156,9 @@ def end_card(
     Returns
     -------
     render.EndCard
-        Absolute intensity at the shaking texture pixels, from broadband PGV
-        where given. Points beyond the stations' coverage show no shaking.
+        Peak ground velocity at the shaking texture pixels, broadband where
+        given (points beyond the stations' coverage show none), the colour
+        scale it tops out, and the words for each town.
     """
     if measures is None:
         logger.info(
@@ -163,21 +166,32 @@ def end_card(
             " low-frequency motion, which underestimates smaller earthquakes"
         )
         stride = shake_scene.wave_stride
-        mmi = palette.pgv_to_mmi(strongest[::stride, ::stride] * render.CMS_PER_MS)
-        return render.EndCard(mmi, _town_words(shake_scene, geometry, spacing, mmi))
-    pgv = intensity_measures.interpolate_pgv(
-        intensity_measures.read_pgv(measures),
-        shake_scene.wave_easting,
-        shake_scene.wave_northing,
-    )
+        pgv = (strongest[::stride, ::stride] * render.CMS_PER_MS).astype(np.float32)
+    else:
+        pgv = intensity_measures.interpolate_pgv(
+            intensity_measures.read_pgv(measures),
+            shake_scene.wave_easting,
+            shake_scene.wave_northing,
+        ).astype(np.float32)
     mmi = np.where(np.isfinite(pgv), palette.pgv_to_mmi(pgv), 1.0).astype(np.float32)
-    land = shake_scene.wave_opacity >= 1.0
-    peak = float(mmi[land].max()) if land.any() else 1.0
-    logger.info("Strongest broadband shaking on land: MMI %.1f", peak)
+    land = (shake_scene.wave_opacity >= 1.0) & np.isfinite(pgv)
+    inside = shake_scene.wave_inside & np.isfinite(pgv)
+    covered = land if land.any() else inside
+    peak = float(pgv[covered].max()) if covered.any() else 1.0
+    if not peak > 0:
+        peak = 1.0
+    logger.info(
+        "Strongest %s shaking on land: %.3g cm/s (MMI %.1f)",
+        "low-frequency" if measures is None else "broadband",
+        peak,
+        float(palette.pgv_to_mmi(peak)),
+    )
     return render.EndCard(
-        mmi,
+        pgv,
+        palette.VelocityScale(peak),
         _town_words(shake_scene, geometry, spacing, mmi),
-        weak=palette.shaking_word(peak) is None,
+        weak=measures is not None
+        and palette.shaking_word(float(mmi[covered].max(initial=1.0))) is None,
     )
 
 
@@ -196,9 +210,10 @@ class MoviePlan:
     velocity: list[Path]
     """`surf_mag` images (ground velocity)."""
     reference: float
-    """The event's strongest ground velocity (m/s), for the relative scale."""
+    """The strongest low-frequency ground velocity (m/s), which the waves are
+    scaled to the top of the colour scale by."""
     end_card: render.EndCard
-    """The final map."""
+    """The final map, and the colour scale."""
 
     def metadata(self) -> dict[str, object]:
         """Describe the movie for its upload.

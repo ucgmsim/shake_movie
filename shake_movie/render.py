@@ -7,9 +7,11 @@ on-screen text are drawn over the 3D frame with matplotlib, and frames are
 piped straight into ffmpeg, one segment per worker, then joined without
 re-encoding.
 
-While the waves travel they are coloured relative to the event's strongest
-ground velocity (`palette.relative_shaking`), so they show for every size of
-event; the final map is absolute intensity in GeoNet's words (`EndCard`).
+Shaking is coloured on one ground velocity scale for the whole movie
+(`palette.VelocityScale`), topped by the strongest broadband shaking. The waves
+are SW4's low-frequency velocity scaled so their strongest reaches that peak;
+the final map is the broadband shaking itself (`EndCard`), with towns named in
+GeoNet's words.
 
 Without a GPU, VTK renders through Mesa (EGL or OSMesa, llvmpipe). Mesh size
 dominates that cost, so a coarser terrain mesh takes over once the camera is
@@ -59,21 +61,13 @@ CREDITS = "Simulated with SW4  ·  Coastline: LINZ (CC BY)  ·  Places © OpenSt
 """Shown on the final map."""
 CMS_PER_MS = 100.0
 """SW4 velocities are m/s; intensities are computed from cm/s."""
-LEGEND_SWITCH = 0.5
-"""How far into the tilt up to the final map its legend replaces the waves'."""
-RELATIVE_TITLE = "Ground motion, relative to the strongest"
-"""Heading of the waves' legend."""
-RELATIVE_ENDS = ("Weaker", "Strongest")
-"""Labels at the ends of the waves' legend."""
 WEAK_NOTE = "Strongest shaking: too weak for most people to notice"
 """Shown on a final map where no shaking on land reaches a word, in place of
 "Strongest shaking felt"."""
 EPICENTRE_COLOUR = "#ffcc1a"
 """Fill of the star marking the epicentre."""
 VELOCITY_TITLE = "Ground velocity (cm/s)"
-"""Heading of the final map's legend."""
-VELOCITY_RANGE = (3.0, 9.0)
-"""Intensities (MMI) the final map's legend spans, labelled as velocities."""
+"""Heading of the legend."""
 DIGIT_WIDTH = 0.6
 """Width of a digit as a fraction of its font size, for spacing tick labels."""
 TICK_GAP = 8.0
@@ -407,6 +401,8 @@ def draw_hud(
     epicentre: npt.NDArray[np.float64],
     settings: Settings,
     weak: bool = False,
+    *,
+    scale: palette.VelocityScale,
 ) -> npt.NDArray[np.uint8]:
     """Draw labels, the fault and on-screen text over a rendered frame.
 
@@ -428,6 +424,8 @@ def draw_hud(
         Frame size.
     weak : bool
         Whether the final map shows no shaking on land, and says so.
+    scale : palette.VelocityScale
+        The colour scale, for the legend.
 
     Returns
     -------
@@ -595,7 +593,7 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
-        _legend(ax, scene, s, h, relative=frame.peak < LEGEND_SWITCH)
+        _legend(ax, scene, s, h, scale)
     _north_arrow(ax, -_heading(frame), s, w, h)
     ax.text(
         w - 48 * s,
@@ -629,16 +627,20 @@ def _heading(frame: Frame) -> float:
     return frame.shot.heading
 
 
-def velocity_ticks(width: float, fontsize: float) -> list[float]:
-    """Pick round velocities (cm/s) to label the final map's legend with.
+def velocity_ticks(
+    scale: palette.VelocityScale, width: float, fontsize: float
+) -> list[float]:
+    """Pick round velocities (cm/s) to label the legend with.
 
-    Boundaries at 1, 2 and 5 of every decade the legend spans, thinned to as
+    Boundaries at 1, 2 and 5 of every decade the scale spans, thinned to as
     many as the bar can carry without their labels touching, measuring the
     widest label rather than assuming a count, and always keeping the largest
     (eqvis_workflow's colour bar ticks).
 
     Parameters
     ----------
+    scale : palette.VelocityScale
+        The colour scale.
     width : float
         Length of the bar (points).
     fontsize : float
@@ -649,14 +651,16 @@ def velocity_ticks(width: float, fontsize: float) -> list[float]:
     list[float]
         Velocities to label, ascending.
     """
-    low, high = palette.mmi_to_pgv(np.array(VELOCITY_RANGE))
+    low, high = scale.low, scale.high
     decades = np.arange(np.floor(np.log10(low)), np.ceil(np.log10(high)) + 1)
     boundaries = [
-        float(f * 10**d)
+        float(f"{f * 10**d:.6g}")
         for d in decades
         for f in (1.0, 2.0, 5.0)
         if low <= f * 10**d <= high
     ]
+    if not boundaries:
+        return []
     per_tick = max(len(f"{b:g}") for b in boundaries) * DIGIT_WIDTH * fontsize
     room = max(2, int(width / (per_tick + TICK_GAP)))
     count = len(boundaries)
@@ -669,17 +673,13 @@ def velocity_ticks(width: float, fontsize: float) -> list[float]:
     return [boundaries[i] for i in kept]
 
 
-def _legend(ax: Axes, scene: Scene, s: float, h: float, relative: bool) -> None:
-    """Draw the shaking scale, relative or in ground velocity, and the fault key."""
+def _legend(
+    ax: Axes, scene: Scene, s: float, h: float, scale: palette.VelocityScale
+) -> None:
+    """Draw the ground velocity scale and the fault key."""
     x0, y0, width, height = 48 * s, h - 92 * s, 620 * s, 18 * s
-    if relative:
-        positions = np.linspace(*palette.RELATIVE_RAMP, 512)
-        title = RELATIVE_TITLE
-    else:
-        positions = np.linspace(*VELOCITY_RANGE, 512)
-        title = VELOCITY_TITLE
-    low, high = palette.MMI_RANGE
-    colours = palette.shaking_cmap()((positions - low) / (high - low))
+    title = VELOCITY_TITLE
+    colours = palette.shaking_cmap()(np.linspace(0.0, 1.0, 512))
     colours[..., 3] = np.maximum(colours[..., 3], 0.35)
     ax.imshow(
         colours[None], extent=(x0, x0 + width, y0 + height, y0), aspect="auto", zorder=8
@@ -687,25 +687,18 @@ def _legend(ax: Axes, scene: Scene, s: float, h: float, relative: bool) -> None:
     ax.add_patch(
         Rectangle((x0, y0), width, height, fill=False, ec="white", lw=1.2 * s, zorder=9)
     )
-    if relative:
-        ticks = [
-            (x0, RELATIVE_ENDS[0], "left"),
-            (x0 + width, RELATIVE_ENDS[1], "right"),
-        ]
-    else:
-        low, high = VELOCITY_RANGE
-        ticks = []
-        for velocity in velocity_ticks(width, 14 * s):
-            x = x0 + (float(palette.pgv_to_mmi(velocity)) - low) / (high - low) * width
-            ax.plot(
-                [x, x],
-                [y0 + height, y0 + height + 6 * s],
-                color="white",
-                lw=1.2 * s,
-                solid_capstyle="butt",
-                zorder=9,
-            )
-            ticks.append((x, f"{velocity:g}", "center"))
+    ticks = []
+    for velocity in velocity_ticks(scale, width, 14 * s):
+        x = x0 + float(scale.level(velocity)) * width
+        ax.plot(
+            [x, x],
+            [y0 + height, y0 + height + 6 * s],
+            color="white",
+            lw=1.2 * s,
+            solid_capstyle="butt",
+            zorder=9,
+        )
+        ticks.append((x, f"{velocity:g}", "center"))
     for x, word, align in ticks:
         ax.text(
             x,
@@ -889,15 +882,15 @@ class Renderer:
         return texture
 
     def shaking_texture(
-        self, mmi: npt.NDArray[np.float32] | None, opacity: float
+        self, level: npt.NDArray[np.float32] | None, opacity: float
     ) -> npt.NDArray[np.uint8] | None:
         """Colour the shaking for the overlay.
 
         Parameters
         ----------
-        mmi : np.ndarray | None
-            Positions on the shaking ramp (MMI units) at shaking texture
-            pixels, or None for no shaking.
+        level : np.ndarray | None
+            Levels on the velocity scale (`palette.VelocityScale.level`) at
+            shaking texture pixels, or None for no shaking.
         opacity : float
             Overall opacity.
 
@@ -906,9 +899,9 @@ class Renderer:
         np.ndarray | None
             RGBA texture, or None.
         """
-        if mmi is None:
+        if level is None:
             return None
-        rgba = palette.shaking_rgba(mmi, self.lut)
+        rgba = palette.shaking_rgba(level, self.lut)
         rgba[..., 3] = (rgba[..., 3] * self.scene.wave_opacity * opacity).astype(
             np.uint8
         )
@@ -968,10 +961,12 @@ class Renderer:
 
 @dataclasses.dataclass(frozen=True)
 class EndCard:
-    """The final map: the strongest shaking, as absolute intensity."""
+    """The final map: the strongest broadband shaking."""
 
-    mmi: npt.NDArray[np.float32]
-    """Strongest shaking intensity at shaking texture pixels."""
+    pgv: npt.NDArray[np.float32]
+    """Peak ground velocity (cm/s) at shaking texture pixels; NaN for none."""
+    scale: palette.VelocityScale
+    """The movie's colour scale, topped by the strongest of `pgv` on land."""
     words: dict[str, str | None]
     """Strongest shaking at each town, in words."""
     weak: bool = False
@@ -993,9 +988,10 @@ class Job:
     velocity: list[Path]
     """`surf_mag` images (ground velocity magnitude)."""
     reference: float
-    """The event's strongest ground velocity (m/s), for the relative scale."""
+    """The strongest low-frequency ground velocity (m/s), which the waves are
+    scaled to the top of the colour scale by."""
     end_card: EndCard
-    """The final map."""
+    """The final map, and the colour scale."""
     settings: Settings
     """How to render."""
     output: Path
@@ -1003,9 +999,16 @@ class Job:
 
 
 def waves(
-    sequence: ImageSequence, time: float, stride: int, reference: float
+    sequence: ImageSequence,
+    time: float,
+    stride: int,
+    reference: float,
+    scale: palette.VelocityScale,
 ) -> npt.NDArray[np.float32]:
-    """The travelling waves at a time, relative to the event's strongest.
+    """The travelling waves at a time, on the movie's velocity scale.
+
+    SW4's low-frequency velocity is scaled so its strongest (`reference`)
+    lands on the top of the scale, the strongest broadband shaking.
 
     Parameters
     ----------
@@ -1016,14 +1019,17 @@ def waves(
     stride : int
         Image points per texture pixel.
     reference : float
-        The event's strongest ground velocity (m/s).
+        The strongest low-frequency ground velocity (m/s).
+    scale : palette.VelocityScale
+        The colour scale.
 
     Returns
     -------
     np.ndarray
-        Positions on the shaking ramp (see `palette.relative_shaking`).
+        Levels on the scale (`palette.VelocityScale.level`).
     """
-    return palette.relative_shaking(sequence.at(time)[::stride, ::stride], reference)
+    velocity = sequence.at(time)[::stride, ::stride]
+    return scale.level(velocity * (scale.high / max(reference, 1e-30)))
 
 
 def fault_lines(
@@ -1135,13 +1141,14 @@ def render_segment(job: Job) -> Path:
     for frame in job.frames[job.start : job.stop]:
         final = frame.peak >= 1.0
         if frame.kind in ("intro", "dive"):
-            mmi = None
+            level = None
         else:
-            mmi = waves(sequence, frame.time, scene.wave_stride, job.reference)
+            scale = job.end_card.scale
+            level = waves(sequence, frame.time, scene.wave_stride, job.reference, scale)
             if frame.peak > 0:
-                strongest = palette.banded(job.end_card.mmi)
-                mmi = mmi * (1 - frame.peak) + strongest * frame.peak
-        shaking = renderer.shaking_texture(mmi, FINAL_OPACITY if final else 1.0)
+                strongest = scale.level(job.end_card.pgv)
+                level = level * (1 - frame.peak) + strongest * frame.peak
+        shaking = renderer.shaking_texture(level, FINAL_OPACITY if final else 1.0)
         image = renderer.render(frame.shot, shaking)
         projector = Projector(*camera_pose(scene, frame.shot, ex), settings)
         labels = placer.place(
@@ -1167,6 +1174,7 @@ def render_segment(job: Job) -> Path:
                 epicentre,
                 settings,
                 job.end_card.weak,
+                scale=job.end_card.scale,
             ).tobytes()
         )
     encoder.stdin.close()
@@ -1197,7 +1205,8 @@ def render_movie(
     velocity : list[Path]
         `surf_mag` images.
     reference : float
-        The event's strongest ground velocity (m/s), for the relative scale.
+        The strongest low-frequency ground velocity (m/s), which the waves are
+        scaled to the top of the colour scale by.
     end_card : EndCard
         The final map.
     settings : Settings

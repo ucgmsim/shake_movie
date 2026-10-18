@@ -96,6 +96,30 @@ def test_waves_are_relative_to_the_strongest(sw4_run: dict[str, Path]) -> None:
     assert plan.reference == pytest.approx(float(moving[plan.scene.wave_inside].max()))
 
 
+def test_waves_reach_the_broadband_peak(
+    sw4_run: dict[str, Path], geometry: GridGeometry, tmp_path: Path
+) -> None:
+    """The waves' strongest moment is coloured as the strongest broadband
+    shaking, however weak the low-frequency motion itself is."""
+    measures = write_measures(
+        tmp_path / "im.h5", geometry, lambda x, y: np.full_like(x, 3.0)
+    )
+    plan = _plan(sw4_run, measures)
+    sequence = ImageSequence(plan.velocity)
+    stride, scale = plan.scene.wave_stride, plan.end_card.scale
+    levels = np.stack(
+        [
+            render.waves(sequence, t, stride, plan.reference, scale)[
+                plan.scene.wave_inside
+            ]
+            for t in sequence.times
+        ]
+    )
+    assert scale.high == pytest.approx(3.0, rel=1e-3)
+    assert levels.max() == pytest.approx(1.0)
+    assert levels.min() >= 0.0
+
+
 def test_end_card_falls_back_to_low_frequency(
     sw4_run: dict[str, Path], caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -104,10 +128,10 @@ def test_end_card_falls_back_to_low_frequency(
         plan = _plan(sw4_run)
     stride = plan.scene.wave_stride
     (hmax,) = sw4_run["images"].glob("surf_hmax.*")
-    expected = palette.pgv_to_mmi(
-        read_image(hmax).values[::stride, ::stride] * render.CMS_PER_MS
-    )
-    np.testing.assert_array_equal(plan.end_card.mmi, expected)
+    expected = read_image(hmax).values[::stride, ::stride] * render.CMS_PER_MS
+    np.testing.assert_allclose(plan.end_card.pgv, expected, rtol=1e-6)
+    land = plan.scene.wave_opacity >= 1.0
+    assert plan.end_card.scale.high == pytest.approx(float(expected[land].max()))
     assert not plan.end_card.weak
     assert "low-frequency" in caplog.text
 
@@ -115,8 +139,9 @@ def test_end_card_falls_back_to_low_frequency(
 def test_end_card_uses_broadband_pgv(
     sw4_run: dict[str, Path], geometry: GridGeometry, tmp_path: Path
 ) -> None:
-    """With intensity measures the final map is broadband intensity, and
-    shows nothing beyond the stations."""
+    """With intensity measures the final map is broadband PGV, the colour
+    scale tops out at its strongest on land, and nothing shows beyond the
+    stations."""
 
     def _pgv(x: npt.NDArray[np.float64], y: npt.NDArray[np.float64]) -> npt.NDArray:
         """Broadband PGV dying away from the source at (22, 17) km (cm/s)."""
@@ -124,13 +149,15 @@ def test_end_card_uses_broadband_pgv(
 
     measures = write_measures(tmp_path / "im.h5", geometry, _pgv)
     plan = _plan(sw4_run, measures)
-    mmi = plan.end_card.mmi
+    pgv = plan.end_card.pgv
     stride = plan.scene.wave_stride
     near = (16 // stride, 17 // stride)
-    assert mmi[near] == pytest.approx(
-        float(palette.pgv_to_mmi(_pgv(np.array(16e3), np.array(17e3)))), abs=0.1
+    assert pgv[near] == pytest.approx(
+        float(_pgv(np.array(16e3), np.array(17e3))), rel=0.2
     )
-    assert mmi[2 // stride, 25 // stride] == 1.0
+    assert np.isnan(pgv[2 // stride, 25 // stride])
+    land = (plan.scene.wave_opacity >= 1.0) & np.isfinite(pgv)
+    assert plan.end_card.scale.high == pytest.approx(float(pgv[land].max()))
     assert not plan.end_card.weak
 
 
@@ -140,8 +167,8 @@ def test_weak_event_end_card_says_so(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When no shaking on land reaches "Weak", the final map says why it is
-    empty; while the waves travel the legend is relative, without MMI words."""
+    """When no shaking on land reaches "Weak", the final map says so; the
+    legend is the same ground velocity scale throughout, without MMI words."""
     measures = write_measures(
         tmp_path / "im.h5", geometry, lambda x, y: np.full_like(x, 0.05)
     )
@@ -153,14 +180,36 @@ def test_weak_event_end_card_says_so(
     final = plan.frames[-1]
     middle = next(frame for frame in plan.frames if frame.kind == "simulation")
     words = {word for _, word in palette.SHAKING_WORDS}
+    scale = plan.end_card.scale
+    ticks = [
+        f"{v:g}"
+        for v in render.velocity_ticks(scale, 620.0 * 320 / 1920, 14.0 * 320 / 1920)
+    ]
     render.draw_hud(
-        image, plan.scene, middle, [], [], np.full(2, np.nan), SETTINGS, True
+        image,
+        plan.scene,
+        middle,
+        [],
+        [],
+        np.full(2, np.nan),
+        SETTINGS,
+        True,
+        scale=scale,
     )
-    assert render.RELATIVE_TITLE in texts and not words & set(texts)
+    during = list(texts)
     texts.clear()
     render.draw_hud(
-        image, plan.scene, final, [], [], np.full(2, np.nan), SETTINGS, True
+        image,
+        plan.scene,
+        final,
+        [],
+        [],
+        np.full(2, np.nan),
+        SETTINGS,
+        True,
+        scale=scale,
     )
-    assert render.WEAK_NOTE in texts
-    assert "Strongest shaking felt" not in texts and not words & set(texts)
-    assert render.VELOCITY_TITLE in texts and "10" in texts
+    assert render.WEAK_NOTE in texts and "Strongest shaking felt" not in texts
+    for drawn in (during, texts):
+        assert render.VELOCITY_TITLE in drawn and not words & set(drawn)
+        assert set(ticks) <= set(drawn)

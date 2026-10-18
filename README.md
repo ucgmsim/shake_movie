@@ -53,24 +53,26 @@ rounding (under 1 m).
   never from elevation: NZCVM stores the sea as 0 m, the same height as much of
   the Canterbury Plains. Lagoons such as Te Waihora are found as large 0 m
   patches inside the coastline.
-- **Shaking:** a warm-only ramp ("Ember") that cannot be mistaken for water,
-  see-through at its low end and faint over the sea.
-- **Waves:** coloured by ground velocity relative to the event's strongest
-  (the largest `mag` value inside the domain), on a log scale over two
-  decades: a hundredth of the strongest is see-through, the strongest deep
-  red. SW4's low-frequency motion from a Mw 4 peaks around 0.003 cm/s, far
-  below anything felt, so an absolute scale would show nothing for most
-  events. The legend says "Ground motion, relative to the strongest", from
-  "Weaker" to "Strongest".
+- **Shaking:** ground velocity in cm/s on one colour scale for the whole
+  movie, in magma, see-through at its low end and faint over the sea. The
+  scale tops out at the strongest broadband shaking on land (`rotd50` PGV from
+  `--intensity-measures`) and spans two decades below it. The legend reads
+  "Ground velocity (cm/s)" throughout, ticked at round velocities (1, 2 and 5
+  of each decade, thinned to fit the bar, as eqvis_workflow ticks its colour
+  bars).
+- **Waves:** SW4's low-frequency ground velocity scaled so its strongest (the
+  largest `mag` value inside the domain) reaches the broadband peak. SW4's
+  low-frequency motion from a Mw 4 peaks around 0.003 cm/s, far below what is
+  felt, so drawn as it is it would show nothing; scaled, the waves fill the
+  same scale the final map is drawn on.
 - **Fault:** drawn grey, turning white as it ruptures ("Fault rupturing").
-- **Ending:** a north-up map of the strongest shaking as absolute intensity,
-  in stepped bands, with the word for each town's shaking (GeoNet's Weak,
-  Light, Moderate, Strong, Severe, Extreme) printed under its name. The
-  legend reads "Ground velocity (cm/s)", ticked at round velocities (1, 2
-  and 5 of each decade, thinned to fit the bar) where intensity turns into
-  peak ground velocity by Worden et al. (2012). When nothing on land reaches
-  "Weak", the map says "Strongest shaking: too weak for most people to
-  notice".
+- **Ending:** a north-up map of the strongest broadband shaking on the same
+  scale, with the word for each town's shaking (GeoNet's Weak, Light,
+  Moderate, Strong, Severe, Extreme, from intensity by Worden et al., 2012)
+  printed under its name. When nothing on land reaches "Weak", the map says
+  "Strongest shaking: too weak for most people to notice". Without
+  `--intensity-measures`, SW4's low-frequency peak (`hmax`) stands in for the
+  broadband.
 - **Domain edge:** only the simulated domain is drawn in relief; SW4's
   absorbing layer around it is the same flat, greyed map as everything
   outside, with a dark wall closing the gap under the domain's edge.
