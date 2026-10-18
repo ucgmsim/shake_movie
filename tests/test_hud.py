@@ -8,7 +8,7 @@ import pytest
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
-from shake_movie import render
+from shake_movie import palette, render
 from shake_movie.cli import plan_movie
 
 LONG_TITLE = "Wednesday 30th September Mw 4.0 earthquake"
@@ -42,8 +42,29 @@ def test_title_card_stays_on_screen(sw4_run: dict[str, Path]) -> None:
     scene = dataclasses.replace(plan.scene, title=LONG_TITLE, location=LONG_PLACE)
     frame = dataclasses.replace(plan.frames[0], kind="intro", title=1.0)
     image = np.zeros((settings.height, settings.width, 3), dtype=np.uint8)
-    hud = render.draw_hud(image, scene, frame, [], [], np.full(2, np.nan), settings)
+    hud = render.draw_hud(
+        image,
+        scene,
+        frame,
+        [],
+        [],
+        np.full(2, np.nan),
+        settings,
+        scale=plan.end_card.scale,
+    )
     # Text is drawn in light colours over the black frame: no light pixel
     # may touch the frame's left or right edge.
     edges = hud[:, [0, 1, -2, -1]].max(axis=2)
     assert edges.max() < 120
+
+
+def test_velocity_ticks_are_round_and_fit_the_bar() -> None:
+    """Ticks fall on 1, 2 and 5 of each decade inside the scale, and thin out
+    on a short bar while keeping the largest."""
+    scale = palette.VelocityScale(0.18)
+    wide = render.velocity_ticks(scale, 620.0, 14.0)
+    assert wide == [0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+    assert all(scale.low <= v <= scale.high for v in wide)
+    narrow = render.velocity_ticks(scale, 120.0, 14.0)
+    assert len(narrow) < len(wide) and narrow[-1] == wide[-1]
+    assert set(narrow) <= set(wide)

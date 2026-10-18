@@ -30,36 +30,27 @@ def test_shaking_words(mmi: float, word: str | None) -> None:
     assert palette.shaking_word(mmi) == word
 
 
-def test_banded_centres_each_word() -> None:
-    """Felt shaking steps to the middle of its band, so colours match words."""
-    banded = palette.banded(np.array([2.5, 3.1, 5.9, 8.7], dtype=np.float32))
-    np.testing.assert_allclose(banded, [2.5, 3.5, 5.5, 8.5])
+def test_velocity_scale_spans_two_decades_below_the_peak() -> None:
+    """The peak is the top, a hundredth of it the bottom, a tenth halfway."""
+    scale = palette.VelocityScale(2.0)
+    assert scale.low == pytest.approx(0.02)
+    level = scale.level([2.0, 0.2, 0.02, 0.0, np.nan, 50.0])
+    np.testing.assert_allclose(level, [1.0, 0.5, 0.0, 0.0, 0.0, 1.0], atol=1e-6)
 
 
-def test_weak_shaking_is_see_through() -> None:
-    """Shaking below "Weak" is invisible and the strongest is opaque."""
+def test_shaking_is_magma_and_see_through_at_the_bottom() -> None:
+    """The bottom of the scale is invisible, the top opaque, and opacity only
+    rises; the colours are magma's."""
     lut = palette.shaking_lut()
-    low, high = palette.MMI_RANGE
-    index = int((3.0 - low) / (high - low) * (len(lut) - 1))
-    assert lut[index, 3] == 0
-    assert lut[-1, 3] == 255
+    assert lut[0, 3] == 0 and lut[-1, 3] == 255
+    assert np.all(np.diff(lut[:, 3].astype(int)) >= 0)
+    from matplotlib import colormaps
+
+    top = np.round(np.asarray(colormaps["magma"](1.0)[:3]) * 255)
+    np.testing.assert_allclose(lut[-1, :3], top, atol=2)
 
 
-def test_relative_scale_shows_tiny_events() -> None:
-    """A Mw 4's low-frequency waves (around 0.003 cm/s at their strongest)
-    are as visible as a large earthquake's, and fade out two decades down."""
-    strongest = 3e-5
-    velocity = strongest * np.array([1.0, 0.3, 0.1, 0.03, 0.01, 0.001])
-    rgba = palette.shaking_rgba(palette.relative_shaking(velocity, strongest))
-    assert rgba[0, 3] > 230
-    assert np.all(rgba[:4, 3] > 0)
-    assert np.all(np.diff(rgba[:, 3].astype(int)) <= 0)
-    assert rgba[4, 3] == 0 and rgba[5, 3] == 0
-    large = palette.shaking_rgba(palette.relative_shaking(velocity * 1e5, 3.0))
-    np.testing.assert_array_equal(rgba, large)
-
-
-def test_relative_level_spans_two_decades() -> None:
-    """The strongest is 1, a hundredth of it 0, and a tenth halfway."""
-    level = palette.relative_level([2.0, 0.2, 0.02, 0.0], 2.0)
-    np.testing.assert_allclose(level, [1.0, 0.5, 0.0, 0.0], atol=1e-6)
+def test_rgba_ignores_missing_shaking() -> None:
+    """NaN (no station coverage) colours as the see-through bottom."""
+    rgba = palette.shaking_rgba(np.array([np.nan, 1.0], dtype=np.float32))
+    assert rgba[0, 3] == 0 and rgba[1, 3] == 255

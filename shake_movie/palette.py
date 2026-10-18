@@ -2,20 +2,23 @@
 
 Land is tinted by elevation from a lowland green that never turns blue, so
 low-lying land never reads as sea; where the sea is comes from the coastline,
-not from elevation. Shaking uses warm colours only (so it cannot be mistaken
-for water) and is see-through at its low end, so weak shaking leaves the map
-readable.
+not from elevation.
 
-The ramp is used two ways. While the waves travel, it shows ground velocity
-relative to the event's own strongest (`relative_shaking`), so the waves show
-for every size of event: SW4's low-frequency motion from a Mw 4 is far too
-weak to colour on an absolute scale. The final map shows absolute intensity
-(MMI) in GeoNet's public words.
+Shaking is ground velocity in cm/s on one colour scale for the whole movie
+(`VelocityScale`), in magma, see-through at its low end so weak shaking leaves
+the map readable. The scale tops out at the strongest broadband shaking. The
+travelling waves are SW4's low-frequency velocity scaled so their strongest
+reaches that same peak: SW4's low-frequency motion from a Mw 4 is far weaker
+than what is felt, and drawn as it is it would not show. Towns on the final map
+are named in GeoNet's public words, from intensity (MMI).
 """
+
+import dataclasses
 
 import numpy as np
 import numpy.typing as npt
-from matplotlib.colors import LinearSegmentedColormap, to_rgb
+from matplotlib import colormaps
+from matplotlib.colors import LinearSegmentedColormap
 
 LAND_STOPS = [
     (0.0, "#8fa77f"),
@@ -39,30 +42,15 @@ SEA_FADE_DISTANCE = 40e3
 LAKE = "#6a8ea3"
 """Lake colour."""
 
-SHAKING_STOPS = [
-    (2.0, "#fff3a8", 0.0),
-    (3.2, "#fff3a8", 0.0),
-    (3.8, "#ffe27a", 0.32),
-    (4.5, "#ffc04a", 0.55),
-    (5.0, "#ffa840", 0.72),
-    (5.5, "#ff8a36", 0.82),
-    (6.5, "#ec4f33", 0.9),
-    (7.5, "#c4213f", 0.94),
-    (8.5, "#8a1050", 0.97),
-    (10.0, "#4d0a4a", 1.0),
-]
-"""Shaking colour and opacity by intensity (MMI)."""
-
-MMI_RANGE = (2.0, 10.0)
-"""Intensities spanned by the shaking colour map."""
-
-RELATIVE_DECADES = 2.0
-"""Ground velocities spanned by the relative scale: from the event's strongest
-down to a hundredth of it."""
-
-RELATIVE_RAMP = (3.2, 7.5)
-"""Where the relative scale sits on the shaking ramp (MMI): a hundredth of the
-strongest is see-through, the strongest a deep red."""
+SHAKING_CMAP = "magma"
+"""Colour map for ground velocity, the whole movie through."""
+SHAKING_CMAP_RANGE = (0.12, 1.0)
+"""Part of `SHAKING_CMAP` used: its near-black end would read as a hole."""
+SHAKING_OPACITY_RISE = 0.4
+"""How far up the scale (0 to 1) shaking takes to rise from see-through."""
+VELOCITY_DECADES = 2.0
+"""Ground velocities the colour scale spans: from the broadband peak down to a
+hundredth of it."""
 
 SEA_SHAKING_OPACITY = 0.3
 """Shaking over the sea means little to viewers; it is drawn faintly there."""
@@ -92,22 +80,53 @@ def land_cmap() -> LinearSegmentedColormap:
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class VelocityScale:
+    """The movie's colour scale: ground velocity on a log scale.
+
+    It tops out at the strongest broadband shaking and spans
+    `VELOCITY_DECADES` below it, so the end card fills it, and the waves,
+    scaled so their strongest is that peak, fill it too.
+    """
+
+    high: float
+    """Ground velocity (cm/s) at the top of the scale."""
+
+    @property
+    def low(self) -> float:
+        """Ground velocity (cm/s) at the bottom of the scale."""
+        return self.high / 10**VELOCITY_DECADES
+
+    def level(self, velocity: npt.ArrayLike) -> npt.NDArray[np.float32]:
+        """Place ground velocity on the scale.
+
+        Parameters
+        ----------
+        velocity : array-like
+            Ground velocity (cm/s); NaN for none.
+
+        Returns
+        -------
+        np.ndarray
+            0 at the bottom of the scale (or below, or NaN), 1 at the top.
+        """
+        velocity = np.nan_to_num(np.asarray(velocity, dtype=np.float64), nan=0.0)
+        ratio = np.maximum(velocity, 1e-30) / self.low
+        return np.clip(np.log10(ratio) / VELOCITY_DECADES, 0.0, 1.0).astype(np.float32)
+
+
 def shaking_cmap() -> LinearSegmentedColormap:
-    """Build the shaking colour map over `SHAKING_STOPS`.
+    """Build the shaking colour map: `SHAKING_CMAP` with a rising opacity.
 
     Returns
     -------
     LinearSegmentedColormap
-        The colour map, with opacity, normalised over `MMI_RANGE`.
+        The colour map over a `VelocityScale` level, 0 to 1.
     """
-    low, high = MMI_RANGE
-    return LinearSegmentedColormap.from_list(
-        "shaking",
-        [
-            ((mmi - low) / (high - low), (*to_rgb(colour), alpha))
-            for mmi, colour, alpha in SHAKING_STOPS
-        ],
-    )
+    levels = np.linspace(0.0, 1.0, 256)
+    rgba = colormaps[SHAKING_CMAP](np.interp(levels, [0, 1], SHAKING_CMAP_RANGE))
+    rgba[:, 3] = np.clip(levels / SHAKING_OPACITY_RISE, 0.0, 1.0) ** 0.8
+    return LinearSegmentedColormap.from_list("shaking", rgba)
 
 
 def shaking_lut(size: int = 256) -> npt.NDArray[np.uint8]:
@@ -116,7 +135,7 @@ def shaking_lut(size: int = 256) -> npt.NDArray[np.uint8]:
     Parameters
     ----------
     size : int
-        Number of entries across `MMI_RANGE`.
+        Number of entries from the bottom of the scale to the top.
 
     Returns
     -------
@@ -127,74 +146,25 @@ def shaking_lut(size: int = 256) -> npt.NDArray[np.uint8]:
 
 
 def shaking_rgba(
-    mmi: npt.NDArray[np.float32], lut: npt.NDArray[np.uint8] | None = None
+    level: npt.NDArray[np.float32], lut: npt.NDArray[np.uint8] | None = None
 ) -> npt.NDArray[np.uint8]:
-    """Colour positions on the shaking ramp.
+    """Colour levels on the velocity scale.
 
     Parameters
     ----------
-    mmi : np.ndarray
-        Positions on the ramp, in MMI (see `MMI_RANGE`).
+    level : np.ndarray
+        Levels from `VelocityScale.level`, 0 to 1.
     lut : np.ndarray | None
         A table from `shaking_lut`, to reuse; built if not given.
 
     Returns
     -------
     np.ndarray
-        RGBA bytes, shape `mmi.shape + (4,)`.
+        RGBA bytes, shape `level.shape + (4,)`.
     """
     lut = shaking_lut() if lut is None else lut
-    low, high = MMI_RANGE
-    index = np.clip((mmi - low) / (high - low) * (len(lut) - 1), 0, len(lut) - 1)
+    index = np.clip(np.nan_to_num(level) * (len(lut) - 1), 0, len(lut) - 1)
     return lut[index.astype(np.int32)]
-
-
-def relative_level(
-    velocity: npt.ArrayLike, reference: float
-) -> npt.NDArray[np.float32]:
-    """Measure ground velocity against the event's strongest, on a log scale.
-
-    Parameters
-    ----------
-    velocity : array-like
-        Ground velocity, in any unit.
-    reference : float
-        The event's strongest ground velocity, in the same unit.
-
-    Returns
-    -------
-    np.ndarray
-        0 at `RELATIVE_DECADES` below `reference` (or weaker), 1 at it.
-    """
-    ratio = np.maximum(np.asarray(velocity, dtype=np.float32), 1e-30) / max(
-        reference, 1e-30
-    )
-    return np.clip(1.0 + np.log10(ratio) / RELATIVE_DECADES, 0.0, 1.0).astype(
-        np.float32
-    )
-
-
-def relative_shaking(
-    velocity: npt.ArrayLike, reference: float
-) -> npt.NDArray[np.float32]:
-    """Place ground velocity on the shaking ramp relative to the strongest.
-
-    Parameters
-    ----------
-    velocity : array-like
-        Ground velocity, in any unit.
-    reference : float
-        The event's strongest ground velocity, in the same unit.
-
-    Returns
-    -------
-    np.ndarray
-        Positions on the shaking ramp (MMI units, see `RELATIVE_RAMP`). They
-        are not intensities: the same position means the same fraction of the
-        strongest, whatever the event's size.
-    """
-    low, high = RELATIVE_RAMP
-    return (low + (high - low) * relative_level(velocity, reference)).astype(np.float32)
 
 
 def pgv_to_mmi(pgv: npt.ArrayLike) -> npt.NDArray[np.float32]:
@@ -233,23 +203,3 @@ def shaking_word(mmi: float) -> str | None:
         if mmi >= start:
             word = name
     return word
-
-
-def banded(mmi: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
-    """Step intensities to the middle of their word's band.
-
-    The final map is drawn in bands so the word printed at each town matches
-    the colour under it.
-
-    Parameters
-    ----------
-    mmi : np.ndarray
-        Modified Mercalli intensity.
-
-    Returns
-    -------
-    np.ndarray
-        Intensities of at least `SHAKING_WORDS[0]` moved to their band's centre.
-    """
-    first = SHAKING_WORDS[0][0]
-    return np.where(mmi >= first, np.floor(mmi) + 0.5, mmi).astype(np.float32)
