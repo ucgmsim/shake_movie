@@ -32,6 +32,7 @@ from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Rectangle
+from matplotlib.text import Text
 
 from shake_movie import palette
 from shake_movie.camera import VERTICAL_FOV, Frame, Shot
@@ -73,6 +74,11 @@ EPICENTRE_COLOUR = "#ffcc1a"
 FONT = "DejaVu Sans"
 HALO = [patheffects.withStroke(linewidth=3.2, foreground="#1a1a1a")]
 HALO_LARGE = [patheffects.withStroke(linewidth=4, foreground="#1a1a1a")]
+TITLE_CARD_WIDTH = 0.9
+"""Most of the frame's width a title card line may take."""
+HUD_TEXT_WIDTH = 0.68
+"""Most of the frame's width the title and place at the top left may take,
+clear of the caption at the top right."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -367,6 +373,21 @@ class LabelPlacer:
 # ----------------------------------------------------------------------- HUD
 
 
+def _fit(text: Text, width: float) -> None:
+    """Shrink a text's font until the text is at most `width` pixels wide.
+
+    Parameters
+    ----------
+    text : Text
+        The drawn text.
+    width : float
+        The widest it may be (pixels).
+    """
+    extent = text.get_window_extent()
+    if extent.width > width:
+        text.set_fontsize(float(text.get_fontsize()) * width / extent.width)
+
+
 def draw_hud(
     image: npt.NDArray[np.uint8],
     scene: Scene,
@@ -486,7 +507,7 @@ def draw_hud(
     )
     if frame.title > 0:
         a = frame.title
-        ax.text(
+        line = ax.text(
             w / 2,
             h * 0.42,
             title,
@@ -499,7 +520,8 @@ def draw_hud(
             path_effects=HALO_LARGE,
             alpha=a,
         )
-        ax.text(
+        _fit(line, TITLE_CARD_WIDTH * w)
+        line = ax.text(
             w / 2,
             h * 0.52,
             scene.location,
@@ -511,7 +533,8 @@ def draw_hud(
             path_effects=HALO_LARGE,
             alpha=a,
         )
-        ax.text(
+        _fit(line, TITLE_CARD_WIDTH * w)
+        line = ax.text(
             w / 2,
             h * 0.585,
             tagline,
@@ -523,8 +546,9 @@ def draw_hud(
             path_effects=HALO_LARGE,
             alpha=a,
         )
+        _fit(line, TITLE_CARD_WIDTH * w)
     elif frame.kind != "intro":
-        ax.text(
+        heading = ax.text(
             48 * s,
             62 * s,
             title,
@@ -535,7 +559,8 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
-        ax.text(
+        _fit(heading, HUD_TEXT_WIDTH * w - 48 * s)
+        place = ax.text(
             50 * s,
             108 * s,
             scene.location,
@@ -545,6 +570,7 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
+        _fit(place, HUD_TEXT_WIDTH * w - 50 * s)
         if frame.peak < 1.0:
             status = f"{frame.time:.0f} seconds after it began"
         else:
