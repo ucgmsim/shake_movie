@@ -74,8 +74,8 @@ def test_title_card_covers_the_epicentre(sw4_run: dict[str, Path]) -> None:
     frame = dataclasses.replace(plan.frames[0], kind="intro", title=1.0)
     image = np.full((settings.height, settings.width, 3), 128, dtype=np.uint8)
 
-    def draw(epicentre: np.ndarray) -> np.ndarray:
-        return render.draw_hud(
+    bare, starred = (
+        render.draw_hud(
             image,
             plan.scene,
             frame,
@@ -85,9 +85,11 @@ def test_title_card_covers_the_epicentre(sw4_run: dict[str, Path]) -> None:
             settings,
             scale=plan.end_card.scale,
         )
-
-    bare = draw(np.full(2, np.nan))
-    starred = draw(np.array([settings.width / 2, settings.height * 0.45]))
+        for epicentre in (
+            np.full(2, np.nan),
+            np.array([settings.width / 2, settings.height * 0.45]),
+        )
+    )
     title = (bare.min(axis=2) > 240)[140:180, 280:360]
     assert title.any()
     assert np.array_equal(
