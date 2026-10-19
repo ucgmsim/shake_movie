@@ -58,6 +58,46 @@ def test_title_card_stays_on_screen(sw4_run: dict[str, Path]) -> None:
     assert edges.max() < 120
 
 
+def test_title_card_covers_the_epicentre(sw4_run: dict[str, Path]) -> None:
+    """The epicentre star sits under the title card, not over it, and the
+    map still shows through around the text."""
+    settings = render.Settings(width=640, height=360, fps=4)
+    plan = plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        settings,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+    )
+    frame = dataclasses.replace(plan.frames[0], kind="intro", title=1.0)
+    image = np.full((settings.height, settings.width, 3), 128, dtype=np.uint8)
+
+    bare, starred = (
+        render.draw_hud(
+            image,
+            plan.scene,
+            frame,
+            [],
+            [],
+            epicentre,
+            settings,
+            scale=plan.end_card.scale,
+        )
+        for epicentre in (
+            np.full(2, np.nan),
+            np.array([settings.width / 2, settings.height * 0.45]),
+        )
+    )
+    title = (bare.min(axis=2) > 240)[140:180, 280:360]
+    assert title.any()
+    assert np.array_equal(
+        starred[140:180, 280:360][title], bare[140:180, 280:360][title]
+    )
+    assert np.array_equal(bare[settings.height // 2, 5], [128, 128, 128])
+
+
 def test_velocity_ticks_are_round_and_fit_the_bar() -> None:
     """Ticks fall on 1, 2 and 5 of each decade inside the scale, and thin out
     on a short bar while keeping the largest."""

@@ -454,6 +454,12 @@ def draw_hud(
     )
     ax.set_xlim(0, w)
     ax.set_ylim(h, 0)
+    # Text goes on its own axes above the map, so the title, legend and
+    # captions always cover the fault, epicentre and town labels.
+    overlay = figure.add_axes((0, 0, 1, 1))
+    overlay.axis("off")
+    overlay.set_xlim(0, w)
+    overlay.set_ylim(h, 0)
     for line, colour, width in fault:
         ax.plot(
             line[:, 0],
@@ -510,14 +516,11 @@ def draw_hud(
             linespacing=1.15,
         )
     title = scene.title
-    tagline = "A computer simulation of how the ground " + (
-        "shook" if scene.is_real else "could shake"
-    )
     if frame.title > 0:
         a = frame.title
-        line = ax.text(
+        line = overlay.text(
             w / 2,
-            h * 0.42,
+            h * 0.45,
             title,
             color="white",
             fontsize=64 * s,
@@ -529,9 +532,9 @@ def draw_hud(
             alpha=a,
         )
         _fit(line, TITLE_CARD_WIDTH * w)
-        line = ax.text(
+        line = overlay.text(
             w / 2,
-            h * 0.52,
+            h * 0.55,
             scene.location,
             color="#f1ede4",
             fontsize=30 * s,
@@ -542,21 +545,8 @@ def draw_hud(
             alpha=a,
         )
         _fit(line, TITLE_CARD_WIDTH * w)
-        line = ax.text(
-            w / 2,
-            h * 0.585,
-            tagline,
-            color="#ffe9b0",
-            fontsize=22 * s,
-            ha="center",
-            va="center",
-            family=FONT,
-            path_effects=HALO_LARGE,
-            alpha=a,
-        )
-        _fit(line, TITLE_CARD_WIDTH * w)
     elif frame.kind != "intro":
-        heading = ax.text(
+        heading = overlay.text(
             48 * s,
             62 * s,
             title,
@@ -568,7 +558,7 @@ def draw_hud(
             path_effects=HALO,
         )
         _fit(heading, HUD_TEXT_WIDTH * w - 48 * s)
-        place = ax.text(
+        place = overlay.text(
             50 * s,
             108 * s,
             scene.location,
@@ -583,7 +573,7 @@ def draw_hud(
             status = f"{frame.time:.0f} seconds after it began"
         else:
             status = WEAK_NOTE if weak else "Strongest shaking felt"
-        ax.text(
+        overlay.text(
             50 * s,
             150 * s,
             status,
@@ -593,9 +583,9 @@ def draw_hud(
             family=FONT,
             path_effects=HALO,
         )
-        _legend(ax, scene, s, h, scale)
-    _north_arrow(ax, -_heading(frame), s, w, h)
-    ax.text(
+        _legend(overlay, scene, s, h, scale)
+    _north_arrow(overlay, -_heading(frame), s, w, h)
+    overlay.text(
         w - 48 * s,
         46 * s,
         CAPTION,
@@ -607,7 +597,7 @@ def draw_hud(
         path_effects=HALO,
     )
     if frame.peak >= 1.0:
-        ax.text(
+        overlay.text(
             w - 110 * s,
             h - 40 * s,
             CREDITS,
