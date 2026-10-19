@@ -94,7 +94,13 @@ class VelocityScale:
 
     @property
     def low(self) -> float:
-        """Ground velocity (cm/s) at the bottom of the scale."""
+        """The bottom of the scale.
+
+        Returns
+        -------
+        float
+            Ground velocity (cm/s) at the bottom of the scale.
+        """
         return self.high / 10**VELOCITY_DECADES
 
     def level(self, velocity: npt.ArrayLike) -> npt.NDArray[np.float32]:
