@@ -320,10 +320,13 @@ def plan_movie(
         reference = 1.0
     logger.info("Strongest low-frequency ground velocity: %.3g cm/s", reference * 100)
 
+    # Waves out at sea are left to run: the camera follows what people feel.
+    on_land = shake_scene.wave_inside & (shake_scene.wave_opacity >= 1.0)
+
     def _felt(time: float) -> npt.NDArray[np.float64]:
-        """NZTM points moving at `camera.FELT_FRACTION` of the strongest or more."""
+        """Land points moving at `camera.FELT_FRACTION` of the strongest or more."""
         now = sequence.at(time)[::stride, ::stride]
-        mask = (now >= camera.FELT_FRACTION * reference) & shake_scene.wave_inside
+        mask = (now >= camera.FELT_FRACTION * reference) & on_land
         points = np.column_stack(
             [shake_scene.wave_easting[mask], shake_scene.wave_northing[mask]]
         )
