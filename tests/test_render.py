@@ -166,19 +166,30 @@ def test_segment_renders_in_process(sw4_run: dict[str, Path], tmp_path: Path) ->
 
 
 def test_fault_planes_show_from_above(sw4_run: dict[str, Path]) -> None:
-    """Seen from straight above, each plane's whole outline is in view."""
+    """Seen from straight above, planes meeting along a fault are drawn as one
+    shape, filled and outlined without seams."""
+    import dataclasses
+
     from shake_movie import cli
 
     settings = render.Settings(width=320, height=180, fps=4)
     plan = cli.plan_movie(
         sw4_run["sw4_input"], sw4_run["realisation"], settings, online=False
     )
-    shot = plan.frames[-1].shot
-    projector = render.Projector(
-        *render.camera_pose(plan.scene, shot, settings.exaggeration), settings
-    )
-    outlines = render.fault_planes(plan.scene, projector, settings.exaggeration)
-    assert [len(outline) for outline in outlines] == [
-        len(plane) for plane in plan.scene.rupture.planes
+    trace, _ = plan.scene.rupture.segments[0]
+    half = len(trace) // 2
+    dipping = [
+        np.concatenate([part, part[::-1] + [3e3, 0.0]])
+        for part in (trace[: half + 1], trace[half:])
     ]
-    assert all(np.isfinite(outline).all() for outline in outlines)
+    scene = dataclasses.replace(
+        plan.scene, rupture=dataclasses.replace(plan.scene.rupture, planes=dipping)
+    )
+    projector = render.Projector(
+        *render.camera_pose(scene, plan.frames[-1].shot, settings.exaggeration),
+        settings,
+    )
+    planes = render.fault_planes(scene, projector, settings.exaggeration)
+    assert len(planes.fills) == 1
+    assert len(planes.edges) == 1
+    assert all(np.isfinite(line).all() for line in (*planes.fills, *planes.edges))

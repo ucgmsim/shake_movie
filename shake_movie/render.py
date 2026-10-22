@@ -29,11 +29,13 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+import shapely
 from matplotlib import patheffects
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import Circle, Polygon, Rectangle
+from matplotlib.patches import Circle, PathPatch, Rectangle
+from matplotlib.path import Path as MplPath
 from matplotlib.text import Text
 
 from shake_movie import palette
@@ -54,6 +56,8 @@ FAR_CLIP = 3e6
 OVERLAY_OFFSET = (-1.0, -1.0)
 """Polygon offset (slope factor, depth units) pulling the shaking toward the
 camera: lifting it alone leaves steep terrain poking through it far out."""
+FILL_CLOSING = 1.0
+"""Gap (pixels) closed between neighbouring fault planes' fills."""
 PLANE_FILL, FINAL_PLANE_FILL = 0.12, 0.4
 """Opacity of the fault planes' fill while the waves play, faint so they show
 through, and on the final map, where the planes are narrow."""
@@ -418,7 +422,7 @@ def draw_hud(
     weak: bool = False,
     *,
     scale: palette.VelocityScale,
-    planes: list[npt.NDArray[np.float64]] | None = None,
+    planes: "FaultPlanes | None" = None,
 ) -> npt.NDArray[np.uint8]:
     """Draw labels, the fault and on-screen text over a rendered frame.
 
@@ -442,8 +446,8 @@ def draw_hud(
         Whether the final map shows no shaking on land, and says so.
     scale : palette.VelocityScale
         The colour scale, for the legend.
-    planes : list[np.ndarray] | None
-        Screen-space outlines of the fault planes.
+    planes : FaultPlanes | None
+        The fault planes in view.
 
     Returns
     -------
@@ -483,21 +487,32 @@ def draw_hud(
     fill = PLANE_FILL + (FINAL_PLANE_FILL - PLANE_FILL) * frame.peak
     edge = 1.0 + 0.5 * frame.peak
     zorder = 4.5 if frame.peak > 0 else 3.5
-    for outline in planes or []:
+    if planes is not None and planes.fills:
+        rings = planes.fills
+        codes = np.concatenate(
+            [
+                [MplPath.MOVETO]
+                + [MplPath.LINETO] * (len(ring) - 2)
+                + [MplPath.CLOSEPOLY]
+                for ring in rings
+            ]
+        )
         ax.add_patch(
-            Polygon(
-                outline, closed=True, fc=(1.0, 1.0, 1.0, fill), ec="none", zorder=zorder
+            PathPatch(
+                MplPath(np.concatenate(rings), codes),
+                fc=(1.0, 1.0, 1.0, fill),
+                ec="none",
+                zorder=zorder,
             )
         )
-        # The outline is a line, not the patch's edge: a stroke effect on a
-        # patch paints its face again.
-        ring = np.vstack([outline, outline[:1]])
+    for line in planes.edges if planes is not None else []:
         ax.plot(
-            ring[:, 0],
-            ring[:, 1],
+            line[:, 0],
+            line[:, 1],
             color=(1.0, 1.0, 1.0, 0.8),
             lw=edge * s,
             solid_joinstyle="round",
+            solid_capstyle="round",
             zorder=zorder,
             path_effects=[
                 patheffects.withStroke(
@@ -1132,13 +1147,27 @@ def fault_lines(
     return lines
 
 
+@dataclasses.dataclass(frozen=True)
+class FaultPlanes:
+    """The fault planes' surface projections in view on a frame."""
+
+    fills: list[npt.NDArray[np.float64]]
+    """Screen rings of the planes in view, merged: exteriors anticlockwise
+    and holes clockwise, for a nonzero fill."""
+    edges: list[npt.NDArray[np.float64]]
+    """Screen polylines: the stretches of the planes' combined outline in
+    view."""
+
+
 def fault_planes(
     scene: Scene, projector: Projector, exaggeration: float
-) -> list[npt.NDArray[np.float64]]:
-    """Project the fault planes' surface outlines, split where terrain hides them.
+) -> FaultPlanes:
+    """Project the fault planes, split where terrain hides them.
 
-    Each plane is cut along strike into the stretches whose top and bottom
-    edges are both in view.
+    Each plane is filled along the stretches of strike where its top and
+    bottom edges are both in view, and those stretches are merged; the
+    outline goes around all the planes together. Neither has seams where
+    planes meet.
 
     Parameters
     ----------
@@ -1151,28 +1180,54 @@ def fault_planes(
 
     Returns
     -------
-    list[np.ndarray]
-        Screen outlines, `(n, 2)` each; none for a point source.
+    FaultPlanes
+        The planes in view; none for a point source.
     """
     if scene.rupture.is_point:
-        return []
-    outlines = []
+        return FaultPlanes([], [])
+
+    def _project(
+        points: npt.NDArray[np.float64],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+        """Drape ground points and project them, with whether each is seen."""
+        z = scene.height_at(points[:, 0], points[:, 1]) * exaggeration + 80.0
+        screen = projector(np.column_stack([points, z]))
+        seen = visible(scene, projector.position, points, exaggeration)
+        return screen, seen & np.isfinite(screen[:, 0])
+
+    def _runs(mask: npt.NDArray[np.bool_]) -> list[npt.NDArray[np.int64]]:
+        """Split the indices where `mask` holds into consecutive runs."""
+        indices = np.flatnonzero(mask)
+        gaps = np.flatnonzero(np.diff(indices) > 1) + 1
+        return [run for run in np.split(indices, gaps) if run.size > 1]
+
+    pieces = []
     for outline in scene.rupture.planes:
-        z = scene.height_at(outline[:, 0], outline[:, 1]) * exaggeration + 80.0
-        screen = projector(np.column_stack([outline, z]))
-        seen = visible(scene, projector.position, outline, exaggeration) & np.isfinite(
-            screen[:, 0]
-        )
+        screen, seen = _project(outline)
         n = len(outline) // 2
         top, bottom = screen[:n], screen[n:][::-1]
-        indices = np.flatnonzero(seen[:n] & seen[n:][::-1])
-        gaps = np.flatnonzero(np.diff(indices) > 1) + 1
-        outlines.extend(
-            np.concatenate([top[run], bottom[run][::-1]])
-            for run in np.split(indices, gaps)
-            if run.size > 1
+        pieces.extend(
+            shapely.Polygon(np.concatenate([top[run], bottom[run][::-1]])).buffer(0)
+            for run in _runs(seen[:n] & seen[n:][::-1])
         )
-    return outlines
+    # Merge the pieces on screen, closing the hairline gaps between planes,
+    # so the fill has no seams where they meet.
+    merged = shapely.union_all(pieces).buffer(FILL_CLOSING).buffer(-FILL_CLOSING)
+    polygons = [
+        shapely.geometry.polygon.orient(polygon)
+        for polygon in shapely.get_parts(merged)
+        if not polygon.is_empty
+    ]
+    fills = [
+        np.asarray(ring.coords)
+        for polygon in polygons
+        for ring in (polygon.exterior, *polygon.interiors)
+    ]
+    edges = []
+    for ring in scene.rupture.footprint():
+        screen, seen = _project(ring)
+        edges.extend(screen[run] for run in _runs(seen))
+    return FaultPlanes(fills, edges)
 
 
 def render_segment(job: Job) -> Path:

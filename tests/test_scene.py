@@ -77,6 +77,24 @@ def test_planes_outline_their_surface_projection(tmp_path: Path) -> None:
     assert np.all(outline[6:, 1] < outline[:6, 1].min())
 
 
+def test_footprint_outlines_neighbouring_planes_as_one(tmp_path: Path) -> None:
+    """Planes meeting at a bend, with a small gap, share one outline."""
+    planes = []
+    for start, end in ((172.0, 172.15), (172.1505, 172.3)):
+        lon = np.tile(np.linspace(start, end, 6), (3, 1))
+        lat = np.array([[-42.5], [-42.52], [-42.54]]) + np.zeros_like(lon)
+        if start > 172.0:
+            lat = lat + np.linspace(0.0, 0.05, 6)
+        planes.append(
+            (lon, lat, np.arange(3.0)[:, None] + np.zeros_like(lon), np.zeros_like(lon))
+        )
+    rupture = scene.Rupture.from_srf(fake_sw4.write_srf(tmp_path / "bend.h5", planes))
+    (ring,) = rupture.footprint()
+    np.testing.assert_allclose(ring[0], ring[-1])
+    spacing = np.hypot(*np.diff(ring, axis=0).T)
+    assert spacing.max() <= scene.FOOTPRINT_SPACING + 1.0
+
+
 def test_gmt_and_wkb_coastlines_agree(tmp_path: Path, geometry: GridGeometry) -> None:
     """Both coastline formats load as NZTM land polygons."""
     from conftest import write_square_coastline

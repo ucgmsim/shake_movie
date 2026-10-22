@@ -70,6 +70,10 @@ OUTSIDE_DIM = 0.45
 """How far ground outside the simulated domain is greyed and darkened."""
 POINT_SOURCE_LENGTH = 3e3
 """Ruptures shorter than this (m) are drawn as an epicentre only."""
+FOOTPRINT_CLOSING = 250.0
+"""Gap (m) between neighbouring fault planes closed when outlining them."""
+FOOTPRINT_SPACING = 250.0
+"""Spacing (m) of points along the fault planes' outline, for draping it."""
 
 
 @dataclasses.dataclass
@@ -440,6 +444,28 @@ class Rupture:
             float(np.hypot(*np.diff(line, axis=0).T).sum()) for line, _ in self.segments
         )
         return length < POINT_SOURCE_LENGTH
+
+    def footprint(self) -> list[npt.NDArray[np.float64]]:
+        """Outline the planes' surface projections together, as one shape.
+
+        Returns
+        -------
+        list[np.ndarray]
+            Closed NZTM rings `(n, 2)`, exteriors and holes alike, with points
+            every `FOOTPRINT_SPACING`.
+        """
+        union = shapely.union_all(
+            [shapely.Polygon(outline).buffer(0) for outline in self.planes]
+        )
+        closed = union.buffer(FOOTPRINT_CLOSING, join_style="mitre").buffer(
+            -FOOTPRINT_CLOSING, join_style="mitre"
+        )
+        return [
+            np.asarray(shapely.segmentize(ring, FOOTPRINT_SPACING).coords)
+            for polygon in shapely.get_parts(closed)
+            if not polygon.is_empty
+            for ring in (polygon.exterior, *polygon.interiors)
+        ]
 
     def ruptured(self, time: float) -> list[npt.NDArray[np.float64]]:
         """Return the parts of the fault that have ruptured by `time`.
