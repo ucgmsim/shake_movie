@@ -59,6 +59,24 @@ def test_multiple_planes_become_segments(tmp_path: Path) -> None:
     assert all(len(line) == 6 for line, _ in rupture.segments)
 
 
+def test_planes_outline_their_surface_projection(tmp_path: Path) -> None:
+    """Each plane's outline runs along its top edge and back along its bottom."""
+    lon = np.tile(np.linspace(172.0, 172.15, 6), (3, 1))
+    lat = np.array([[-42.5], [-42.52], [-42.54]]) + np.zeros_like(lon)
+    srf = fake_sw4.write_srf(
+        tmp_path / "dipping.h5",
+        [(lon, lat, np.arange(3.0)[:, None] + np.zeros_like(lon), np.zeros_like(lon))],
+    )
+    rupture = scene.Rupture.from_srf(srf)
+    (outline,) = rupture.planes
+    line, _ = rupture.segments[0]
+    assert outline.shape == (12, 2)
+    np.testing.assert_allclose(outline[:6], line)
+    # The bottom edge comes back the other way, south of the top.
+    assert outline[6, 0] > outline[11, 0]
+    assert np.all(outline[6:, 1] < outline[:6, 1].min())
+
+
 def test_gmt_and_wkb_coastlines_agree(tmp_path: Path, geometry: GridGeometry) -> None:
     """Both coastline formats load as NZTM land polygons."""
     from conftest import write_square_coastline

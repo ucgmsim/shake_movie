@@ -4,10 +4,11 @@ Every shot comes from the rupture and the shaking; nothing is set per event:
 
 1. Heading: look across the fault from the side where more people live, so
    towns sit in the foreground, keeping north within 60 degrees of screen-up.
-2. Framing: the part of the fault that has ruptured, plus everywhere moving at
-   a tenth or more of the event's strongest ground velocity (the waves as
-   they are drawn), padded by 30% and at least `MIN_WIDTH` across.
-3. The camera only ever pulls back: the framed size is a running maximum.
+2. Framing: the part of the fault that has ruptured, plus everywhere on land
+   moving at a tenth or more of the event's strongest ground velocity (the
+   waves as they are drawn; waves out at sea are left to run), padded by 30%
+   and at least `MIN_WIDTH` across.
+3. The camera only ever pulls back: it frames everywhere framed so far.
 4. The path is smoothed with look-ahead (the movie is rendered after the
    run), then evaluated at every frame through monotone splines, so the
    camera glides rather than stepping at SW4's image interval.
@@ -287,8 +288,8 @@ def plan_camera(
     towns : list[Town]
         Candidate towns, for the heading.
     felt : Callable[[float], np.ndarray]
-        NZTM points moving at `FELT_FRACTION` of the strongest ground velocity
-        or more at a time, `(n, 2)`.
+        NZTM points on land moving at `FELT_FRACTION` of the strongest ground
+        velocity or more at a time, `(n, 2)`.
     end_time : float
         End of the simulation (s).
     aspect : float
@@ -305,19 +306,27 @@ def plan_camera(
         domain_width * 1.05, domain_depth * 1.05, PITCH_WIDE, aspect
     )
     times = np.arange(0.0, end_time + PLAN_INTERVAL, PLAN_INTERVAL)
-    centres, widths, depths = [], [], []
+    forward, right = _axes(heading)
+    bounds = []
     for t in times:
         framed = [rupture.hypocentre[None, :]]
         if not rupture.is_point:
             framed.extend(rupture.ruptured(t))
         framed.append(felt(t))
-        centre, width, depth = extents(np.concatenate(framed), heading)
-        centres.append(centre)
-        widths.append(max(width * FRAMING_PAD, MIN_WIDTH))
-        depths.append(max(depth * FRAMING_PAD, MIN_WIDTH / aspect))
-    # Only ever pull back.
-    widths = np.maximum.accumulate(widths)
-    depths = np.maximum.accumulate(depths)
+        points = np.concatenate(framed)
+        across, into = points @ right, points @ forward
+        bounds.append([-across.min(), across.max(), -into.min(), into.max()])
+    # Only ever pull back: frame everywhere framed so far, so the camera
+    # widens to take in the waves rather than chasing them at a fixed size.
+    bounds = np.maximum.accumulate(np.asarray(bounds), axis=0)
+    low_across, high_across = -bounds[:, 0], bounds[:, 1]
+    low_into, high_into = -bounds[:, 2], bounds[:, 3]
+    centres = (
+        right * ((low_across + high_across) / 2)[:, None]
+        + forward * ((low_into + high_into) / 2)[:, None]
+    )
+    widths = np.maximum((high_across - low_across) * FRAMING_PAD, MIN_WIDTH)
+    depths = np.maximum((high_into - low_into) * FRAMING_PAD, MIN_WIDTH / aspect)
     distance = np.minimum(
         [
             fit_distance(w, d, PITCH_TIGHT, aspect)

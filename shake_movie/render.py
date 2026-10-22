@@ -33,7 +33,7 @@ from matplotlib import patheffects
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Circle, Polygon, Rectangle
 from matplotlib.text import Text
 
 from shake_movie import palette
@@ -45,6 +45,20 @@ FAR_LOD_DISTANCE = 180e3
 """Camera distance (m) beyond which the coarse terrain mesh is drawn."""
 OVERLAY_LIFT = 40.0
 """Height (m, before exaggeration) the shaking sits above the terrain."""
+NEAR_FRACTION = 0.5
+"""Near clipping plane as a fraction of the camera's height above the highest
+ground: a fixed near plane leaves far-out shots too little depth precision to
+tell the terrain, the shaking and the map beneath apart."""
+FAR_CLIP = 3e6
+"""Far clipping plane (m)."""
+OVERLAY_OFFSET = (-1.0, -1.0)
+"""Polygon offset (slope factor, depth units) pulling the shaking toward the
+camera: lifting it alone leaves steep terrain poking through it far out."""
+PLANE_FILL = 0.4
+"""Opacity of the fault planes' fill on the final map."""
+FINAL_TRACE = 0.5
+"""How much thinner the fault's trace is drawn on the final map, so the
+planes dipping away from it show."""
 LABEL_FADE = 0.4
 """Time (s) a town label takes to fade in or out."""
 MAX_LABELS, MAX_FINAL_LABELS = 8, 14
@@ -403,6 +417,7 @@ def draw_hud(
     weak: bool = False,
     *,
     scale: palette.VelocityScale,
+    planes: list[npt.NDArray[np.float64]] | None = None,
 ) -> npt.NDArray[np.uint8]:
     """Draw labels, the fault and on-screen text over a rendered frame.
 
@@ -426,6 +441,8 @@ def draw_hud(
         Whether the final map shows no shaking on land, and says so.
     scale : palette.VelocityScale
         The colour scale, for the legend.
+    planes : list[np.ndarray] | None
+        Screen-space outlines of the fault planes, faded in with the final map.
 
     Returns
     -------
@@ -460,6 +477,36 @@ def draw_hud(
     overlay.axis("off")
     overlay.set_xlim(0, w)
     overlay.set_ylim(h, 0)
+    for outline in planes or []:
+        ax.add_patch(
+            Polygon(
+                outline,
+                closed=True,
+                fc=(1.0, 1.0, 1.0, PLANE_FILL * frame.peak),
+                ec=(1.0, 1.0, 1.0, frame.peak),
+                lw=1.5 * s,
+                zorder=4.5,
+                path_effects=[
+                    patheffects.withStroke(
+                        linewidth=4 * s, foreground="#1a1a1a", alpha=frame.peak
+                    ),
+                    patheffects.Normal(),
+                ],
+            )
+        )
+    # Every halo goes beneath every line, so a fault of several planes reads
+    # as one unbroken trace.
+    thin = 1 - FINAL_TRACE * frame.peak
+    fault = [(line, colour, width * thin) for line, colour, width in fault]
+    for line, _, width in fault:
+        ax.plot(
+            line[:, 0],
+            line[:, 1],
+            color="#1a1a1a",
+            lw=(width + 3) * s,
+            solid_capstyle="round",
+            zorder=3.9,
+        )
     for line, colour, width in fault:
         ax.plot(
             line[:, 0],
@@ -468,9 +515,6 @@ def draw_hud(
             lw=width * s,
             solid_capstyle="round",
             zorder=4,
-            path_effects=[
-                patheffects.withStroke(linewidth=(width + 3) * s, foreground="#1a1a1a")
-            ],
         )
     if np.all(np.isfinite(epicentre)):
         ax.plot(
@@ -847,6 +891,11 @@ class Renderer:
                 diffuse=0.0,
                 smooth_shading=True,
             )
+            # VTK's switch for polygon offsets is global, the offset per mapper.
+            over_actor.mapper.SetResolveCoincidentTopologyToPolygonOffset()
+            over_actor.mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(
+                *OVERLAY_OFFSET
+            )
             self.levels.append((base_actor, over_actor))
             # The domain's terrain stands on the flat map; a wall closes the
             # gap beneath its edge when the camera looks across it.
@@ -860,6 +909,8 @@ class Renderer:
                 plotter.add_mesh(skirt, color=SKIRT, ambient=1.0, diffuse=0.0)
             )
         self.plotter = plotter
+        # The highest surface drawn: the shaking over the coarse mesh.
+        self.top = float(scene.mesh_elevation.max()) * ex + 2 * OVERLAY_LIFT * ex
         self.lut = palette.shaking_lut()
 
     def _texture(self, image: npt.NDArray[np.uint8], mipmap: bool = False) -> "object":
@@ -931,7 +982,10 @@ class Renderer:
             tuple(up),
         )
         camera.view_angle = VERTICAL_FOV
-        camera.clipping_range = (1000.0, 3e6)
+        camera.clipping_range = (
+            max(1000.0, NEAR_FRACTION * (position[2] - self.top)),
+            FAR_CLIP,
+        )
         # Render explicitly: an off-screen plotter's screenshot otherwise
         # returns the first frame again.
         window = self.plotter.render_window
@@ -1066,6 +1120,36 @@ def fault_lines(
     return lines
 
 
+def fault_planes(
+    scene: Scene, projector: Projector, exaggeration: float
+) -> list[npt.NDArray[np.float64]]:
+    """Project the fault planes' surface outlines.
+
+    Parameters
+    ----------
+    scene : Scene
+        The scene.
+    projector : Projector
+        The frame's projection.
+    exaggeration : float
+        Vertical exaggeration.
+
+    Returns
+    -------
+    list[np.ndarray]
+        Screen outlines, `(n, 2)` each; none for a point source.
+    """
+    if scene.rupture.is_point:
+        return []
+    outlines = []
+    for outline in scene.rupture.planes:
+        z = scene.height_at(outline[:, 0], outline[:, 1]) * exaggeration + 80.0
+        screen = projector(np.column_stack([outline, z]))
+        if np.all(np.isfinite(screen)):
+            outlines.append(screen)
+    return outlines
+
+
 def render_segment(job: Job) -> Path:
     """Render and encode one worker's frames.
 
@@ -1165,6 +1249,7 @@ def render_segment(job: Job) -> Path:
                 settings,
                 job.end_card.weak,
                 scale=job.end_card.scale,
+                planes=fault_planes(scene, projector, ex) if frame.peak > 0 else None,
             ).tobytes()
         )
     encoder.stdin.close()
