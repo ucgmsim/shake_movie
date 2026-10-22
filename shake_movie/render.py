@@ -54,8 +54,9 @@ FAR_CLIP = 3e6
 OVERLAY_OFFSET = (-1.0, -1.0)
 """Polygon offset (slope factor, depth units) pulling the shaking toward the
 camera: lifting it alone leaves steep terrain poking through it far out."""
-PLANE_FILL = 0.4
-"""Opacity of the fault planes' fill on the final map."""
+PLANE_FILL, FINAL_PLANE_FILL = 0.12, 0.4
+"""Opacity of the fault planes' fill while the waves play, faint so they show
+through, and on the final map, where the planes are narrow."""
 FINAL_TRACE = 0.5
 """How much thinner the fault's trace is drawn on the final map, so the
 planes dipping away from it show."""
@@ -442,7 +443,7 @@ def draw_hud(
     scale : palette.VelocityScale
         The colour scale, for the legend.
     planes : list[np.ndarray] | None
-        Screen-space outlines of the fault planes, faded in with the final map.
+        Screen-space outlines of the fault planes.
 
     Returns
     -------
@@ -477,22 +478,33 @@ def draw_hud(
     overlay.axis("off")
     overlay.set_xlim(0, w)
     overlay.set_ylim(h, 0)
+    # The planes lie beneath the trace while it shows the rupture spreading,
+    # and over its thinned line on the final map, where they are narrow.
+    fill = PLANE_FILL + (FINAL_PLANE_FILL - PLANE_FILL) * frame.peak
+    edge = 1.0 + 0.5 * frame.peak
+    zorder = 4.5 if frame.peak > 0 else 3.5
     for outline in planes or []:
         ax.add_patch(
             Polygon(
-                outline,
-                closed=True,
-                fc=(1.0, 1.0, 1.0, PLANE_FILL * frame.peak),
-                ec=(1.0, 1.0, 1.0, frame.peak),
-                lw=1.5 * s,
-                zorder=4.5,
-                path_effects=[
-                    patheffects.withStroke(
-                        linewidth=4 * s, foreground="#1a1a1a", alpha=frame.peak
-                    ),
-                    patheffects.Normal(),
-                ],
+                outline, closed=True, fc=(1.0, 1.0, 1.0, fill), ec="none", zorder=zorder
             )
+        )
+        # The outline is a line, not the patch's edge: a stroke effect on a
+        # patch paints its face again.
+        ring = np.vstack([outline, outline[:1]])
+        ax.plot(
+            ring[:, 0],
+            ring[:, 1],
+            color=(1.0, 1.0, 1.0, 0.8),
+            lw=edge * s,
+            solid_joinstyle="round",
+            zorder=zorder,
+            path_effects=[
+                patheffects.withStroke(
+                    linewidth=(edge + 2.5) * s, foreground="#1a1a1a", alpha=0.6
+                ),
+                patheffects.Normal(),
+            ],
         )
     # Every halo goes beneath every line, so a fault of several planes reads
     # as one unbroken trace.
@@ -1123,7 +1135,10 @@ def fault_lines(
 def fault_planes(
     scene: Scene, projector: Projector, exaggeration: float
 ) -> list[npt.NDArray[np.float64]]:
-    """Project the fault planes' surface outlines.
+    """Project the fault planes' surface outlines, split where terrain hides them.
+
+    Each plane is cut along strike into the stretches whose top and bottom
+    edges are both in view.
 
     Parameters
     ----------
@@ -1145,8 +1160,18 @@ def fault_planes(
     for outline in scene.rupture.planes:
         z = scene.height_at(outline[:, 0], outline[:, 1]) * exaggeration + 80.0
         screen = projector(np.column_stack([outline, z]))
-        if np.all(np.isfinite(screen)):
-            outlines.append(screen)
+        seen = visible(scene, projector.position, outline, exaggeration) & np.isfinite(
+            screen[:, 0]
+        )
+        n = len(outline) // 2
+        top, bottom = screen[:n], screen[n:][::-1]
+        indices = np.flatnonzero(seen[:n] & seen[n:][::-1])
+        gaps = np.flatnonzero(np.diff(indices) > 1) + 1
+        outlines.extend(
+            np.concatenate([top[run], bottom[run][::-1]])
+            for run in np.split(indices, gaps)
+            if run.size > 1
+        )
     return outlines
 
 
@@ -1249,7 +1274,7 @@ def render_segment(job: Job) -> Path:
                 settings,
                 job.end_card.weak,
                 scale=job.end_card.scale,
-                planes=fault_planes(scene, projector, ex) if frame.peak > 0 else None,
+                planes=fault_planes(scene, projector, ex),
             ).tobytes()
         )
     encoder.stdin.close()
