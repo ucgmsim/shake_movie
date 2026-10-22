@@ -163,3 +163,22 @@ def test_segment_renders_in_process(sw4_run: dict[str, Path], tmp_path: Path) ->
     )
     assert render.render_segment(job).stat().st_size > 0
     assert plan.metadata()["title"] == "Mw 6.0 earthquake"
+
+
+def test_fault_planes_show_from_above(sw4_run: dict[str, Path]) -> None:
+    """Seen from straight above, each plane's whole outline is in view."""
+    from shake_movie import cli
+
+    settings = render.Settings(width=320, height=180, fps=4)
+    plan = cli.plan_movie(
+        sw4_run["sw4_input"], sw4_run["realisation"], settings, online=False
+    )
+    shot = plan.frames[-1].shot
+    projector = render.Projector(
+        *render.camera_pose(plan.scene, shot, settings.exaggeration), settings
+    )
+    outlines = render.fault_planes(plan.scene, projector, settings.exaggeration)
+    assert [len(outline) for outline in outlines] == [
+        len(plane) for plane in plan.scene.rupture.planes
+    ]
+    assert all(np.isfinite(outline).all() for outline in outlines)
