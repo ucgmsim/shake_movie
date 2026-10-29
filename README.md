@@ -20,7 +20,7 @@ says where the rest is:
 | File | From | Used for |
 |---|---|---|
 | `topo` image (z = 0, cycle 0) | SW4 `imagehdf5 mode=topo` | Terrain mesh and hillshade |
-| `surf_mag` images (z = 0, every 0.5 s) | SW4 `imagehdf5 mode=mag` | Shaking, interpolated in time to the frame rate |
+| `surf_mag` images (z = 0, every 0.1 s) | SW4 `imagehdf5 mode=mag` | Shaking, interpolated in time to the frame rate |
 | `surf_hmax` image (z = 0, end) | SW4 `imagehdf5 mode=hmax` | Strongest shaking map, without intensity measures |
 | SRF (`rupturehdf5`) | the SRF SW4 ran | Fault trace, rupture timing, epicentre |
 | Realisation JSON | the workflow | Magnitude, simulated domain, coastline |

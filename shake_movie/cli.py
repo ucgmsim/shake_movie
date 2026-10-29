@@ -4,7 +4,7 @@ Run it as `shake-movie SW4_INPUT REALISATION [--intensity-measures
 intensity_measures.h5] [--output MOVIE.mp4]`.
 Everything else is read from the SW4 input file: where SW4 wrote its images
 (`fileio`), which `imagehdf5` commands hold the terrain (`topo`), the ground
-velocity (`mag`, every 0.5 s in the workflow's defaults) and its peak
+velocity (`mag`, every 0.1 s in the workflow's defaults) and its peak
 (`hmax`), and the SRF it ran (`rupturehdf5`). SW4 driven by an SRF slip
 *rate* outputs velocity where its modes say displacement, so `mag` is ground
 velocity and `hmax` peak horizontal ground velocity.
