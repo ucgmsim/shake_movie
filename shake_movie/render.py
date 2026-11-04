@@ -19,16 +19,19 @@ far out.
 """
 
 import dataclasses
+import functools
 import itertools
 import os
 import shutil
 import subprocess
 import tempfile
+from importlib import resources
 from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+from matplotlib import image as mpimg
 from matplotlib import patheffects
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -92,6 +95,18 @@ INSET_LAND = "#b9b4a8"
 """Fill of New Zealand on the inset map."""
 DOMAIN_COLOUR = "#e8412c"
 """Outline of the simulated domain on the inset map."""
+DEFAULT_BRANDING = Path(
+    str(resources.files("shake_movie") / "branding" / "seismicnow.png")
+)
+"""SeismicNow's header, drawn at the top right with `--branding`. Rendered
+from `seismicnow.svg` beside it (`rsvg-convert -z 4`)."""
+BRANDING_HEIGHT = 46.0
+"""Height (pixels at 1080p) of the branded header at the top right."""
+BRANDING_MARGIN = 36.0
+"""Gap (pixels at 1080p) between the branded header and the frame's top."""
+CAPTION_RIGHT = 48.0
+"""Gap (pixels at 1080p) between the caption, or the header above it, and the
+frame's right edge."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -108,6 +123,9 @@ class Settings:
     """Vertical exaggeration of the terrain."""
     crf: int = 20
     """x264 quality (lower is better)."""
+    branding: Path | None = None
+    """An image (PNG or JPEG) drawn as a header at the top right, above the
+    caption; none leaves the caption at the top."""
 
     @property
     def aspect(self) -> float:
@@ -596,9 +614,12 @@ def draw_hud(
     left, top, width, _ = inset_box(s, w, h)
     _inset_map(overlay, scene, s, w, h)
     _north_arrow(overlay, -_heading(frame), s, left + width / 2, top - 58 * s)
+    caption_y = 46 * s
+    if settings.branding is not None:
+        caption_y = _branding(overlay, settings.branding, s, w) + 22 * s
     overlay.text(
-        w - 48 * s,
-        46 * s,
+        w - CAPTION_RIGHT * s,
+        caption_y,
         CAPTION,
         color="#e9e6df",
         fontsize=13 * s,
@@ -744,6 +765,67 @@ def _legend(
             family=FONT,
             path_effects=HALO,
         )
+
+
+@functools.cache
+def load_branding(path: Path) -> npt.NDArray[np.float32]:
+    """Read a branding image, once per process.
+
+    Parameters
+    ----------
+    path : Path
+        A PNG or JPEG.
+
+    Returns
+    -------
+    np.ndarray
+        The image, `(rows, columns, channels)`, scaled to 0-1.
+    """
+    image = np.asarray(mpimg.imread(path), dtype=np.float32)
+    return image / 255.0 if image.max() > 1.0 else image
+
+
+def branding_box(
+    image: npt.NDArray[np.float32], s: float, w: float
+) -> tuple[float, float, float, float]:
+    """Place the branded header at the frame's top right.
+
+    It is `BRANDING_HEIGHT` tall, unless that would make a wide image run into
+    the title at the top left, when it shrinks to fit beside it.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        The branding image.
+    s : float
+        Frame width as a fraction of 1920 pixels.
+    w : float
+        Frame width (pixels).
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Pixel `(left, top, width, height)` of the header, from the top left.
+    """
+    rows, columns = image.shape[:2]
+    room = (1 - HUD_TEXT_WIDTH) * w - (CAPTION_RIGHT + 24) * s
+    height = min(BRANDING_HEIGHT * s, room * rows / columns)
+    width = height * columns / rows
+    return w - CAPTION_RIGHT * s - width, BRANDING_MARGIN * s, width, height
+
+
+def _branding(ax: Axes, path: Path, s: float, w: float) -> float:
+    """Draw the branded header at the top right, returning its bottom edge."""
+    image = load_branding(path)
+    left, top, width, height = branding_box(image, s, w)
+    ax.imshow(
+        image,
+        extent=(left, left + width, top + height, top),
+        interpolation="antialiased",
+        aspect="auto",
+        zorder=8,
+    )
+    return top + height
 
 
 def inset_box(s: float, w: float, h: float) -> tuple[float, float, float, float]:
