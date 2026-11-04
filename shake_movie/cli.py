@@ -19,11 +19,15 @@ which underestimates how strongly smaller earthquakes are felt.
 
 Next to the movie, a JSON file records its title, place and date for the
 upload.
+
+`--branding` draws SeismicNow's header at the top right, above the caption;
+`--branding=HEADER.png` draws another image there instead.
 """
 
 import dataclasses
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -48,6 +52,41 @@ logger = logging.getLogger("shake_movie")
 
 FELT_POINTS = 4000
 """Most shaking points the camera considers per sample."""
+BRANDING = "--branding"
+"""The option naming a header image, which may be given without one."""
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
+"""Images `--branding` reads."""
+
+
+def expand_branding(args: list[str]) -> list[str]:
+    """Give a bare `--branding` the default header.
+
+    Typer options can't take an optional value, so a `--branding` not followed
+    by an image becomes `--branding=<SeismicNow's header>`; `--branding PATH`
+    and `--branding=PATH` pass through.
+
+    Parameters
+    ----------
+    args : list[str]
+        Command line arguments, without the program name.
+
+    Returns
+    -------
+    list[str]
+        The arguments, with a bare `--branding` expanded.
+    """
+    expanded = []
+    for k, arg in enumerate(args):
+        following = args[k + 1] if k + 1 < len(args) else ""
+        if arg == BRANDING and Path(following).suffix.lower() not in IMAGE_SUFFIXES:
+            arg = f"{BRANDING}={render.DEFAULT_BRANDING}"
+        expanded.append(arg)
+    return expanded
+
+
+def run() -> None:
+    """Run the command line, letting `--branding` go without a value."""
+    app(expand_branding(sys.argv[1:]))
 
 
 def _image_prefix(commands: dict[str, list[dict[str, str]]], mode: str) -> str | None:
@@ -399,6 +438,15 @@ def main(
         bool,
         typer.Option(help="Do not ask GeoNet or Nominatim for the date and place."),
     ] = False,
+    branding: Annotated[
+        Path | None,
+        typer.Option(
+            BRANDING,
+            exists=True,
+            dir_okay=False,
+            help="Draw a header at the top right: SeismicNow's when given alone, or this PNG/JPEG (--branding=HEADER.png).",
+        ),
+    ] = None,
 ) -> None:
     """Render a public-facing video of an SW4 simulation.
 
@@ -428,9 +476,12 @@ def main(
         Frames per second.
     offline : bool
         Skip the date and place lookups.
+    branding : Path | None
+        A header image for the top right (SeismicNow's for a bare
+        `--branding`); none leaves the caption at the top.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    settings = render.Settings(width=width, height=height, fps=fps)
+    settings = render.Settings(width=width, height=height, fps=fps, branding=branding)
     plan = plan_movie(
         sw4_input,
         realisation,
