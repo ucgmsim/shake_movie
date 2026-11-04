@@ -33,12 +33,13 @@ from matplotlib import patheffects
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.patches import Circle, PathPatch, Rectangle
+from matplotlib.path import Path as MplPath
 from matplotlib.text import Text
 
 from shake_movie import palette
 from shake_movie.camera import VERTICAL_FOV, Frame, Shot
-from shake_movie.scene import Scene, Town
+from shake_movie.scene import INSET_BOUNDS, Scene, Town
 from shake_movie.sw4_images import ImageSequence
 
 FAR_LOD_DISTANCE = 180e3
@@ -83,6 +84,14 @@ TITLE_CARD_WIDTH = 0.9
 HUD_TEXT_WIDTH = 0.68
 """Most of the frame's width the title and place at the top left may take,
 clear of the caption at the top right."""
+INSET_HEIGHT = 220.0
+"""Height (pixels at 1080p) of the New Zealand inset map at the bottom right."""
+INSET_MARGIN = 32.0
+"""Gap (pixels at 1080p) between the inset map and the frame's edges."""
+INSET_LAND = "#b9b4a8"
+"""Fill of New Zealand on the inset map."""
+DOMAIN_COLOUR = "#e8412c"
+"""Outline of the simulated domain on the inset map."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -584,7 +593,9 @@ def draw_hud(
             path_effects=HALO,
         )
         _legend(overlay, scene, s, h, scale)
-    _north_arrow(overlay, -_heading(frame), s, w, h)
+    left, top, width, _ = inset_box(s, w, h)
+    _inset_map(overlay, scene, s, w, h)
+    _north_arrow(overlay, -_heading(frame), s, left + width / 2, top - 58 * s)
     overlay.text(
         w - 48 * s,
         46 * s,
@@ -598,7 +609,7 @@ def draw_hud(
     )
     if frame.peak >= 1.0:
         overlay.text(
-            w - 110 * s,
+            left - 24 * s,
             h - 40 * s,
             CREDITS,
             color="#d7d3cb",
@@ -735,9 +746,89 @@ def _legend(
         )
 
 
-def _north_arrow(ax: Axes, rotation: float, s: float, w: float, h: float) -> None:
-    """Draw a north arrow turned by the camera heading."""
-    cx, cy, r = w - 70 * s, h - 80 * s, 28 * s
+def inset_box(s: float, w: float, h: float) -> tuple[float, float, float, float]:
+    """Place the inset map in the frame's bottom right corner.
+
+    Parameters
+    ----------
+    s : float
+        Frame width as a fraction of 1920 pixels.
+    w : float
+        Frame width (pixels).
+    h : float
+        Frame height (pixels).
+
+    Returns
+    -------
+    tuple[float, float, float, float]
+        Pixel `(left, top, width, height)` of the inset, from the top left.
+    """
+    min_e, min_n, max_e, max_n = INSET_BOUNDS
+    height = INSET_HEIGHT * s
+    width = height * (max_e - min_e) / (max_n - min_n)
+    margin = INSET_MARGIN * s
+    return w - margin - width, h - margin - height, width, height
+
+
+def _inset_map(ax: Axes, scene: Scene, s: float, w: float, h: float) -> None:
+    """Draw New Zealand, north up, with the simulated domain and hypocentre."""
+    left, top, width, height = inset_box(s, w, h)
+    min_e, min_n, max_e, max_n = INSET_BOUNDS
+
+    def _pixels(points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Map NZTM points `(n, 2)` to inset pixels."""
+        points = np.atleast_2d(points)
+        return np.column_stack(
+            [
+                left + (points[:, 0] - min_e) / (max_e - min_e) * width,
+                top + (max_n - points[:, 1]) / (max_n - min_n) * height,
+            ]
+        )
+
+    frame = Rectangle(
+        (left, top),
+        width,
+        height,
+        fc="#1a1a1a",
+        ec="#e9e6df",
+        lw=1.0 * s,
+        alpha=0.55,
+        zorder=8,
+    )
+    ax.add_patch(frame)
+    if scene.inset_land:
+        land = MplPath.make_compound_path(
+            *(MplPath(_pixels(ring), closed=True) for ring in scene.inset_land)
+        )
+        patch = PathPatch(land, fc=INSET_LAND, ec="none", zorder=9)
+        ax.add_patch(patch)
+        patch.set_clip_path(frame)
+    domain = _pixels(np.vstack([scene.domain, scene.domain[:1]]))
+    (outline,) = ax.plot(
+        domain[:, 0],
+        domain[:, 1],
+        color=DOMAIN_COLOUR,
+        lw=1.8 * s,
+        solid_joinstyle="miter",
+        zorder=10,
+        path_effects=[patheffects.withStroke(linewidth=3.2 * s, foreground="#1a1a1a")],
+    )
+    outline.set_clip_path(frame)
+    (star,) = ax.plot(
+        *_pixels(scene.rupture.hypocentre)[0],
+        marker="*",
+        ms=13 * s,
+        mfc=EPICENTRE_COLOUR,
+        mec="#1a1a1a",
+        mew=1.0 * s,
+        zorder=11,
+    )
+    star.set_clip_path(frame)
+
+
+def _north_arrow(ax: Axes, rotation: float, s: float, cx: float, cy: float) -> None:
+    """Draw a north arrow turned by the camera heading, centred on `(cx, cy)`."""
+    r = 28 * s
     a = np.radians(rotation)
     ax.add_patch(Circle((cx, cy), r, color="#1a1a1a", alpha=0.45))
     ax.annotate(

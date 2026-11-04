@@ -108,3 +108,50 @@ def test_velocity_ticks_are_round_and_fit_the_bar() -> None:
     narrow = render.velocity_ticks(scale, 120.0, 14.0)
     assert len(narrow) < len(wide) and narrow[-1] == wide[-1]
     assert set(narrow) <= set(wide)
+
+
+def test_inset_map_sits_in_the_bottom_right_below_the_compass(
+    sw4_run: dict[str, Path],
+) -> None:
+    """The inset shows the domain in red at the bottom right, and the north
+    arrow sits above it."""
+    settings = render.Settings(width=640, height=360, fps=4)
+    plan = plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        settings,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+    )
+    # A domain large enough to see at the inset's scale, round the hypocentre.
+    corners = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]]) * 80e3
+    scene = dataclasses.replace(
+        plan.scene, domain=plan.scene.rupture.hypocentre + corners
+    )
+    image = np.zeros((settings.height, settings.width, 3), dtype=np.uint8)
+    hud = render.draw_hud(
+        image,
+        scene,
+        plan.frames[len(plan.frames) // 2],
+        [],
+        [],
+        np.full(2, np.nan),
+        settings,
+        scale=plan.end_card.scale,
+    ).astype(int)
+    s = settings.width / 1920
+    left, top, width, height = render.inset_box(s, settings.width, settings.height)
+    assert left + width < settings.width and top + height < settings.height
+    # Red right of the legend (whose colour bar runs through red) is the domain.
+    half = settings.width // 2
+    right = hud[:, half:]
+    red = (right[..., 0] > 150) & (right[..., 1] < 110) & (right[..., 2] < 110)
+    rows, columns = np.nonzero(red)
+    assert rows.size > 0
+    assert rows.min() >= top and columns.min() + half >= left
+    # The north arrow (white) is drawn above the inset, not over it.
+    arrow_rows, _ = np.nonzero(hud[:, int(left) :].min(axis=2) > 230)
+    assert arrow_rows.size > 0
+    assert arrow_rows.max() < top

@@ -70,6 +70,13 @@ OUTSIDE_DIM = 0.45
 """How far ground outside the simulated domain is greyed and darkened."""
 POINT_SOURCE_LENGTH = 3e3
 """Ruptures shorter than this (m) are drawn as an epicentre only."""
+INSET_BOUNDS = (1_050_000.0, 4_730_000.0, 2_110_000.0, 6_210_000.0)
+"""NZTM bounds `(min_e, min_n, max_e, max_n)` of the inset map: the North,
+South and Stewart Islands, leaving out the Chathams and sub-Antarctic islands."""
+INSET_TOLERANCE = 2_000.0
+"""How far (m) the inset's simplified coastline may stray from the real one."""
+INSET_MIN_AREA = 30e6
+"""Smallest island (m^2) drawn on the inset map."""
 
 
 @dataclasses.dataclass
@@ -145,6 +152,29 @@ def load_coastline(path: Path) -> shapely.Geometry:
         return _read_gmt_rings(path)
     with gzip.open(path) as handle:
         return shapely.from_wkb(handle.read())
+
+
+def inset_outline(coastline: shapely.Geometry) -> list[npt.NDArray[np.float64]]:
+    """Simplify the coastline to the islands drawn on the inset map.
+
+    Parameters
+    ----------
+    coastline : shapely.Geometry
+        Land polygons in NZTM.
+
+    Returns
+    -------
+    list[np.ndarray]
+        Each island's outline, `(n, 2)` NZTM points, within `INSET_BOUNDS`.
+    """
+    land = shapely.simplify(
+        shapely.clip_by_rect(coastline, *INSET_BOUNDS), INSET_TOLERANCE
+    )
+    return [
+        np.asarray(polygon.exterior.coords)
+        for polygon in shapely.get_parts(land)
+        if isinstance(polygon, shapely.Polygon) and polygon.area >= INSET_MIN_AREA
+    ]
 
 
 def cache_directory() -> Path:
@@ -537,6 +567,8 @@ class Scene:
     labels and lines and testing what the terrain hides."""
     domain: npt.NDArray[np.float64]
     """NZTM corners of the simulated domain (inside SW4's sponge), `(4, 2)`."""
+    inset_land: list[npt.NDArray[np.float64]]
+    """Simplified outlines of New Zealand's main islands, for the inset map."""
     towns: list[Town]
     """Towns inside the context map."""
     rupture: Rupture
@@ -775,6 +807,7 @@ def build_scene(
         height_bounds=height_bounds,
         height=height,
         domain=domain,
+        inset_land=inset_outline(coastline),
         towns=towns,
         rupture=rupture,
         title=title,

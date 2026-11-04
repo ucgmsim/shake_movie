@@ -130,3 +130,18 @@ def test_scene_on_sw4_output(sw4_run: dict[str, Path], geometry: GridGeometry) -
     assert (built.wave_opacity == 1.0).any() and np.isclose(
         built.wave_opacity, levels[1]
     ).any()
+
+
+def test_inset_outline_keeps_only_large_islands_on_the_mainland_map() -> None:
+    """Islands off the inset or too small to see are dropped."""
+    coastline = shapely.MultiPolygon(
+        [
+            shapely.box(1_500_000, 5_000_000, 1_600_000, 5_100_000),  # on the map
+            shapely.box(1_700_000, 5_200_000, 1_701_000, 5_201_000),  # too small
+            shapely.box(2_500_000, 5_000_000, 2_600_000, 5_100_000),  # the Chathams
+        ]
+    )
+    outline = scene.inset_outline(coastline)
+    assert len(outline) == 1
+    assert outline[0].shape[1] == 2
+    assert outline[0][:, 0].min() == pytest.approx(1_500_000)
