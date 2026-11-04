@@ -31,7 +31,7 @@ Source = "https://github.com/ucgmsim/shake_movie"
 Issues = "https://github.com/ucgmsim/shake_movie/issues"
 
 [project.scripts]
-shake-movie = "shake_movie.cli:app"
+shake-movie = "shake_movie.cli:run"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=5"]
@@ -48,7 +48,7 @@ fallback_version = "0.0.0"
 find = { include = ["shake_movie*"] }
 
 [tool.setuptools.package-data]
-shake_movie = ["nz_places.csv"]
+shake_movie = ["nz_places.csv", "branding/*"]
 
 [tool.deptry]
 optional_dependencies_dev_groups = ["test"]

@@ -76,6 +76,14 @@ rounding (under 1 m).
 - **Domain edge:** only the simulated domain is drawn in relief; SW4's
   absorbing layer around it is the same flat, greyed map as everything
   outside, with a dark wall closing the gap under the domain's edge.
+- **Branding:** `--branding` draws SeismicNow's header (the logo, "SeismicNow"
+  and "UC Earthquake Engineering", from the SeismicNow app's top bar) at the
+  top right, with "Computer simulation. Real shaking may differ." beneath it.
+  `--branding=HEADER.png` (or `--branding HEADER.png`) draws another PNG or
+  JPEG there instead, 46 px tall at 1080p. Without `--branding`, the caption
+  sits alone at the top right. The header is
+  `shake_movie/branding/seismicnow.svg` (text as outlines), rendered to the
+  `seismicnow.png` beside it with `rsvg-convert -z 4`.
 
 ## Camera
 

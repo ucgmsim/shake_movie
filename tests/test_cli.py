@@ -215,3 +215,30 @@ def test_weak_event_end_card_says_so(
     for drawn in (during, texts):
         assert render.VELOCITY_TITLE in drawn and not words & set(drawn)
         assert set(ticks) <= set(drawn)
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["a.in", "b.json", "--branding"], f"--branding={render.DEFAULT_BRANDING}"),
+        (["--branding", "a.in", "b.json"], f"--branding={render.DEFAULT_BRANDING}"),
+        (["--branding", "--offline"], f"--branding={render.DEFAULT_BRANDING}"),
+        (["--branding", "logo.PNG"], "--branding"),
+        (["--branding=logo.png"], "--branding=logo.png"),
+    ],
+)
+def test_bare_branding_takes_the_default_header(args: list[str], expected: str) -> None:
+    """A bare `--branding` names SeismicNow's header; a given image is kept."""
+    expanded = cli.expand_branding(args)
+    assert len(expanded) == len(args)
+    assert expected in expanded
+    assert [arg for arg in expanded if not arg.startswith("--branding")] == [
+        arg for arg in args if not arg.startswith("--branding")
+    ]
+
+
+def test_default_branding_ships_with_the_package() -> None:
+    """SeismicNow's header is installed with shake-movie and reads as RGBA."""
+    image = render.load_branding(render.DEFAULT_BRANDING)
+    assert image.ndim == 3 and image.shape[2] == 4
+    assert 0.0 <= image.min() and image.max() <= 1.0
