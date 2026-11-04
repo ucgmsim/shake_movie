@@ -95,7 +95,8 @@ Every shot is worked out from the rupture and the shaking (`camera.py`):
 
 The movie runs: a 4 s title over the whole domain, a 2 s dive to the
 epicentre, the simulation in real time, a 3 s tilt up to the map, and a 6 s
-hold.
+hold. Every frame has a north arrow at the bottom right, above an inset map of
+New Zealand showing the simulated domain (red) and the hypocentre (star).
 
 ## Names
 
