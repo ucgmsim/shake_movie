@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+import shapely
 from matplotlib import image as mpimg
 from matplotlib import patheffects
 from matplotlib.axes import Axes
@@ -49,6 +50,23 @@ FAR_LOD_DISTANCE = 180e3
 """Camera distance (m) beyond which the coarse terrain mesh is drawn."""
 OVERLAY_LIFT = 40.0
 """Height (m, before exaggeration) the shaking sits above the terrain."""
+NEAR_FRACTION = 0.5
+"""Near clipping plane as a fraction of the camera's height above the highest
+ground: a fixed near plane leaves far-out shots too little depth precision to
+tell the terrain, the shaking and the map beneath apart."""
+FAR_CLIP = 3e6
+"""Far clipping plane (m)."""
+OVERLAY_OFFSET = (-1.0, -1.0)
+"""Polygon offset (slope factor, depth units) pulling the shaking toward the
+camera: lifting it alone leaves steep terrain poking through it far out."""
+FILL_CLOSING = 1.0
+"""Gap (pixels) closed between neighbouring fault planes' fills."""
+PLANE_FILL, FINAL_PLANE_FILL = 0.12, 0.4
+"""Opacity of the fault planes' fill while the waves play, faint so they show
+through, and on the final map, where the planes are narrow."""
+FINAL_TRACE = 0.5
+"""How much thinner the fault's trace is drawn on the final map, so the
+planes dipping away from it show."""
 LABEL_FADE = 0.4
 """Time (s) a town label takes to fade in or out."""
 MAX_LABELS, MAX_FINAL_LABELS = 8, 14
@@ -430,6 +448,7 @@ def draw_hud(
     weak: bool = False,
     *,
     scale: palette.VelocityScale,
+    planes: "FaultPlanes | None" = None,
 ) -> npt.NDArray[np.uint8]:
     """Draw labels, the fault and on-screen text over a rendered frame.
 
@@ -453,6 +472,8 @@ def draw_hud(
         Whether the final map shows no shaking on land, and says so.
     scale : palette.VelocityScale
         The colour scale, for the legend.
+    planes : FaultPlanes | None
+        The fault planes in view.
 
     Returns
     -------
@@ -487,6 +508,58 @@ def draw_hud(
     overlay.axis("off")
     overlay.set_xlim(0, w)
     overlay.set_ylim(h, 0)
+    # The planes lie beneath the trace while it shows the rupture spreading,
+    # and over its thinned line on the final map, where they are narrow.
+    fill = PLANE_FILL + (FINAL_PLANE_FILL - PLANE_FILL) * frame.peak
+    edge = 1.0 + 0.5 * frame.peak
+    zorder = 4.5 if frame.peak > 0 else 3.5
+    if planes is not None and planes.fills:
+        rings = planes.fills
+        codes = np.concatenate(
+            [
+                [MplPath.MOVETO]
+                + [MplPath.LINETO] * (len(ring) - 2)
+                + [MplPath.CLOSEPOLY]
+                for ring in rings
+            ]
+        )
+        ax.add_patch(
+            PathPatch(
+                MplPath(np.concatenate(rings), codes),
+                fc=(1.0, 1.0, 1.0, fill),
+                ec="none",
+                zorder=zorder,
+            )
+        )
+    for line in planes.edges if planes is not None else []:
+        ax.plot(
+            line[:, 0],
+            line[:, 1],
+            color=(1.0, 1.0, 1.0, 0.8),
+            lw=edge * s,
+            solid_joinstyle="round",
+            solid_capstyle="round",
+            zorder=zorder,
+            path_effects=[
+                patheffects.withStroke(
+                    linewidth=(edge + 2.5) * s, foreground="#1a1a1a", alpha=0.6
+                ),
+                patheffects.Normal(),
+            ],
+        )
+    # Every halo goes beneath every line, so a fault of several planes reads
+    # as one unbroken trace.
+    thin = 1 - FINAL_TRACE * frame.peak
+    fault = [(line, colour, width * thin) for line, colour, width in fault]
+    for line, _, width in fault:
+        ax.plot(
+            line[:, 0],
+            line[:, 1],
+            color="#1a1a1a",
+            lw=(width + 3) * s,
+            solid_capstyle="round",
+            zorder=3.9,
+        )
     for line, colour, width in fault:
         ax.plot(
             line[:, 0],
@@ -495,9 +568,6 @@ def draw_hud(
             lw=width * s,
             solid_capstyle="round",
             zorder=4,
-            path_effects=[
-                patheffects.withStroke(linewidth=(width + 3) * s, foreground="#1a1a1a")
-            ],
         )
     if np.all(np.isfinite(epicentre)):
         ax.plot(
@@ -1020,6 +1090,11 @@ class Renderer:
                 diffuse=0.0,
                 smooth_shading=True,
             )
+            # VTK's switch for polygon offsets is global, the offset per mapper.
+            over_actor.mapper.SetResolveCoincidentTopologyToPolygonOffset()
+            over_actor.mapper.SetRelativeCoincidentTopologyPolygonOffsetParameters(
+                *OVERLAY_OFFSET
+            )
             self.levels.append((base_actor, over_actor))
             # The domain's terrain stands on the flat map; a wall closes the
             # gap beneath its edge when the camera looks across it.
@@ -1033,6 +1108,8 @@ class Renderer:
                 plotter.add_mesh(skirt, color=SKIRT, ambient=1.0, diffuse=0.0)
             )
         self.plotter = plotter
+        # The highest surface drawn: the shaking over the coarse mesh.
+        self.top = float(scene.mesh_elevation.max()) * ex + 2 * OVERLAY_LIFT * ex
         self.lut = palette.shaking_lut()
 
     def _texture(self, image: npt.NDArray[np.uint8], mipmap: bool = False) -> "object":
@@ -1104,7 +1181,10 @@ class Renderer:
             tuple(up),
         )
         camera.view_angle = VERTICAL_FOV
-        camera.clipping_range = (1000.0, 3e6)
+        camera.clipping_range = (
+            max(1000.0, NEAR_FRACTION * (position[2] - self.top)),
+            FAR_CLIP,
+        )
         # Render explicitly: an off-screen plotter's screenshot otherwise
         # returns the first frame again.
         window = self.plotter.render_window
@@ -1239,6 +1319,89 @@ def fault_lines(
     return lines
 
 
+@dataclasses.dataclass(frozen=True)
+class FaultPlanes:
+    """The fault planes' surface projections in view on a frame."""
+
+    fills: list[npt.NDArray[np.float64]]
+    """Screen rings of the planes in view, merged: exteriors anticlockwise
+    and holes clockwise, for a nonzero fill."""
+    edges: list[npt.NDArray[np.float64]]
+    """Screen polylines: the stretches of the planes' combined outline in
+    view."""
+
+
+def fault_planes(
+    scene: Scene, projector: Projector, exaggeration: float
+) -> FaultPlanes:
+    """Project the fault planes, split where terrain hides them.
+
+    Each plane is filled along the stretches of strike where its top and
+    bottom edges are both in view, and those stretches are merged; the
+    outline goes around all the planes together. Neither has seams where
+    planes meet.
+
+    Parameters
+    ----------
+    scene : Scene
+        The scene.
+    projector : Projector
+        The frame's projection.
+    exaggeration : float
+        Vertical exaggeration.
+
+    Returns
+    -------
+    FaultPlanes
+        The planes in view; none for a point source.
+    """
+    if scene.rupture.is_point:
+        return FaultPlanes([], [])
+
+    def _project(
+        points: npt.NDArray[np.float64],
+    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+        """Drape ground points and project them, with whether each is seen."""
+        z = scene.height_at(points[:, 0], points[:, 1]) * exaggeration + 80.0
+        screen = projector(np.column_stack([points, z]))
+        seen = visible(scene, projector.position, points, exaggeration)
+        return screen, seen & np.isfinite(screen[:, 0])
+
+    def _runs(mask: npt.NDArray[np.bool_]) -> list[npt.NDArray[np.int64]]:
+        """Split the indices where `mask` holds into consecutive runs."""
+        indices = np.flatnonzero(mask)
+        gaps = np.flatnonzero(np.diff(indices) > 1) + 1
+        return [run for run in np.split(indices, gaps) if run.size > 1]
+
+    pieces = []
+    for outline in scene.rupture.planes:
+        screen, seen = _project(outline)
+        n = len(outline) // 2
+        top, bottom = screen[:n], screen[n:][::-1]
+        pieces.extend(
+            shapely.Polygon(np.concatenate([top[run], bottom[run][::-1]])).buffer(0)
+            for run in _runs(seen[:n] & seen[n:][::-1])
+        )
+    # Merge the pieces on screen, closing the hairline gaps between planes,
+    # so the fill has no seams where they meet.
+    merged = shapely.union_all(pieces).buffer(FILL_CLOSING).buffer(-FILL_CLOSING)
+    polygons = [
+        shapely.geometry.polygon.orient(polygon)
+        for polygon in shapely.get_parts(merged)
+        if not polygon.is_empty
+    ]
+    fills = [
+        np.asarray(ring.coords)
+        for polygon in polygons
+        for ring in (polygon.exterior, *polygon.interiors)
+    ]
+    edges = []
+    for ring in scene.rupture.footprint():
+        screen, seen = _project(ring)
+        edges.extend(screen[run] for run in _runs(seen))
+    return FaultPlanes(fills, edges)
+
+
 def render_segment(job: Job) -> Path:
     """Render and encode one worker's frames.
 
@@ -1338,6 +1501,7 @@ def render_segment(job: Job) -> Path:
                 settings,
                 job.end_card.weak,
                 scale=job.end_card.scale,
+                planes=fault_planes(scene, projector, ex),
             ).tobytes()
         )
     encoder.stdin.close()

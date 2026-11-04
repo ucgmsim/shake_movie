@@ -77,6 +77,10 @@ INSET_TOLERANCE = 2_000.0
 """How far (m) the inset's simplified coastline may stray from the real one."""
 INSET_MIN_AREA = 30e6
 """Smallest island (m^2) drawn on the inset map."""
+FOOTPRINT_CLOSING = 250.0
+"""Gap (m) between neighbouring fault planes closed when outlining them."""
+FOOTPRINT_SPACING = 250.0
+"""Spacing (m) of points along the fault planes' outline, for draping it."""
 
 
 @dataclasses.dataclass
@@ -453,6 +457,9 @@ class Rupture:
     """NZTM position of the first point to rupture (the epicentre)."""
     end_time: float
     """When the last point starts to rupture (s)."""
+    planes: list[npt.NDArray[np.float64]] = dataclasses.field(default_factory=list)
+    """Per SRF plane: the NZTM `(n, 2)` outline of its surface projection, the
+    top edge then the bottom edge back."""
 
     @property
     def is_point(self) -> bool:
@@ -467,6 +474,28 @@ class Rupture:
             float(np.hypot(*np.diff(line, axis=0).T).sum()) for line, _ in self.segments
         )
         return length < POINT_SOURCE_LENGTH
+
+    def footprint(self) -> list[npt.NDArray[np.float64]]:
+        """Outline the planes' surface projections together, as one shape.
+
+        Returns
+        -------
+        list[np.ndarray]
+            Closed NZTM rings `(n, 2)`, exteriors and holes alike, with points
+            every `FOOTPRINT_SPACING`.
+        """
+        union = shapely.union_all(
+            [shapely.Polygon(outline).buffer(0) for outline in self.planes]
+        )
+        closed = union.buffer(FOOTPRINT_CLOSING, join_style="mitre").buffer(
+            -FOOTPRINT_CLOSING, join_style="mitre"
+        )
+        return [
+            np.asarray(shapely.segmentize(ring, FOOTPRINT_SPACING).coords)
+            for polygon in shapely.get_parts(closed)
+            if not polygon.is_empty
+            for ring in (polygon.exterior, *polygon.interiors)
+        ]
 
     def ruptured(self, time: float) -> list[npt.NDArray[np.float64]]:
         """Return the parts of the fault that have ruptured by `time`.
@@ -506,7 +535,7 @@ class Rupture:
             planes = np.atleast_1d(handle.attrs["PLANE"])
             points = handle["POINTS"][:]
         to_nztm = Transformer.from_crs("EPSG:4326", NZTM, always_xy=True)
-        segments = []
+        segments, outlines = [], []
         offset = 0
         for plane in planes:
             nstk, ndip = int(plane["NSTK"]), int(plane["NDIP"])
@@ -521,11 +550,22 @@ class Rupture:
             segments.append(
                 (np.column_stack([easting, northing]), tinit.astype(np.float64))
             )
+            bottom_e, bottom_n = to_nztm.transform(
+                block["LON"][-nstk:][::-1], block["LAT"][-nstk:][::-1]
+            )
+            outlines.append(
+                np.column_stack(
+                    [
+                        np.concatenate([easting, bottom_e]),
+                        np.concatenate([northing, bottom_n]),
+                    ]
+                )
+            )
         first = int(np.argmin(points["TINIT"]))
         hypocentre = np.array(
             to_nztm.transform(points["LON"][first], points["LAT"][first])
         )
-        return cls(segments, hypocentre, float(points["TINIT"].max()))
+        return cls(segments, hypocentre, float(points["TINIT"].max()), outlines)
 
 
 @dataclasses.dataclass
