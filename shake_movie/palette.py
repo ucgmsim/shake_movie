@@ -40,7 +40,11 @@ SEA_FAR = "#3e5f75"
 SEA_FADE_DISTANCE = 40e3
 """Distance offshore (m) over which the sea darkens, standing in for depth."""
 LAKE = "#6a8ea3"
-"""Lake colour."""
+"""Colour of lakes and rivers."""
+ROAD = "#f2ece0"
+"""Road colour."""
+ROAD_OPACITY = 0.7
+"""How strongly roads cover the terrain beneath."""
 
 SHAKING_CMAP = "magma"
 """Colour map for ground velocity, the whole movie through."""
