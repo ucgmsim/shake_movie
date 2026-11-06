@@ -220,3 +220,59 @@ def test_wide_branding_shrinks_beside_the_title() -> None:
     assert left >= render.HUD_TEXT_WIDTH * w
     assert height < render.BRANDING_HEIGHT
     assert width / height == pytest.approx(40.0)
+
+
+def test_slip_spreads_then_gives_way_to_the_planes(sw4_run: dict[str, Path]) -> None:
+    """The fault's cells colour in as it slips, and fade from the final map."""
+    settings = render.Settings(width=640, height=360, fps=4)
+    plan = plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        settings,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+    )
+    scene = plan.scene
+    frame = next(f for f in plan.frames if f.kind == "simulation")
+    shot = dataclasses.replace(frame.shot, pitch=89.0)
+    projector = render.Projector(
+        *render.camera_pose(scene, shot, settings.exaggeration), settings
+    )
+
+    def _slip(time: float) -> render.SlipCells:
+        cells = render.fault_slip(scene, projector, time, settings.exaggeration)
+        assert cells is not None
+        return cells
+
+    assert len(_slip(-1.0).quads) == 0
+    early, late = _slip(0.5), _slip(10.0)
+    assert 0 < len(early.quads) < len(late.quads)
+    assert np.isfinite(late.quads).all()
+    # The most-slipped cell is the most opaque.
+    assert late.colours[:, 3].max() == pytest.approx(render.SLIP_OPACITY)
+
+    none = render.SlipCells(np.empty((0, 4, 2)), np.empty((0, 4)))
+
+    def _hud(peak: float, slip: render.SlipCells) -> npt.NDArray[np.uint8]:
+        """Draw the frame at `peak` of the way to the final map."""
+        return render.draw_hud(
+            np.zeros((settings.height, settings.width, 3), dtype=np.uint8),
+            scene,
+            dataclasses.replace(frame, shot=shot, peak=peak),
+            [],
+            [],
+            np.full(2, np.nan),
+            settings,
+            scale=plan.end_card.scale,
+            planes=render.fault_planes(scene, projector, settings.exaggeration),
+            slip=slip,
+        )
+
+    def _changed(peak: float) -> int:
+        """Count pixels the slip changes."""
+        return int((_hud(peak, late) != _hud(peak, none)).any(axis=-1).sum())
+
+    assert _changed(0.0) > 50
+    assert _changed(1.0) == 0

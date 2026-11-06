@@ -29,6 +29,7 @@ from importlib import resources
 from multiprocessing import get_context
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import numpy.typing as npt
 import shapely
@@ -36,6 +37,7 @@ from matplotlib import image as mpimg
 from matplotlib import patheffects
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, PathPatch, Rectangle
 from matplotlib.path import Path as MplPath
@@ -64,6 +66,13 @@ FILL_CLOSING = 1.0
 PLANE_FILL, FINAL_PLANE_FILL = 0.12, 0.4
 """Opacity of the fault planes' fill while the waves play, faint so they show
 through, and on the final map, where the planes are narrow."""
+SLIP_CMAP = "hot"
+"""Colour map for slip so far, as rupture_generator's viewer draws it."""
+SLIP_OPACITY = 0.85
+"""Opacity of the most-slipped fault cells."""
+SLIP_FADE = 0.15
+"""Fraction of the peak slip over which a cell fades in, so cells that barely
+slip stay faint."""
 FINAL_TRACE = 0.5
 """How much thinner the fault's trace is drawn on the final map, so the
 planes dipping away from it show."""
@@ -449,6 +458,7 @@ def draw_hud(
     *,
     scale: palette.VelocityScale,
     planes: "FaultPlanes | None" = None,
+    slip: "SlipCells | None" = None,
 ) -> npt.NDArray[np.uint8]:
     """Draw labels, the fault and on-screen text over a rendered frame.
 
@@ -474,6 +484,10 @@ def draw_hud(
         The colour scale, for the legend.
     planes : FaultPlanes | None
         The fault planes in view.
+    slip : SlipCells | None
+        The fault's cells coloured by slip so far, when the SRF has slip
+        rates. They take the planes' place while the waves play, and give way
+        to them on the final map.
 
     Returns
     -------
@@ -485,6 +499,8 @@ def draw_hud(
     figure = Figure(figsize=(w / 100, h / 100), dpi=100)
     canvas = FigureCanvasAgg(figure)
     ax = figure.add_axes((0, 0, 1, 1))
+    if slip is not None and len(slip.quads) and frame.peak < 1:
+        image = _blend_slip(image, slip, 1 - frame.peak)
     ax.imshow(image)
     ax.axis("off")
     # Soft shading behind the text, top left and along the bottom.
@@ -511,6 +527,8 @@ def draw_hud(
     # The planes lie beneath the trace while it shows the rupture spreading,
     # and over its thinned line on the final map, where they are narrow.
     fill = PLANE_FILL + (FINAL_PLANE_FILL - PLANE_FILL) * frame.peak
+    if slip is not None:
+        fill = FINAL_PLANE_FILL * frame.peak
     edge = 1.0 + 0.5 * frame.peak
     zorder = 4.5 if frame.peak > 0 else 3.5
     if planes is not None and planes.fills:
@@ -1402,6 +1420,133 @@ def fault_planes(
     return FaultPlanes(fills, edges)
 
 
+@dataclasses.dataclass(frozen=True)
+class SlipCells:
+    """The fault's cells in view on a frame, coloured by slip so far."""
+
+    quads: npt.NDArray[np.float64]
+    """Screen corners of each cell, `(cells, 4, 2)`."""
+    colours: npt.NDArray[np.float64]
+    """RGBA of each cell, `(cells, 4)`."""
+
+
+def _blend_slip(
+    image: npt.NDArray[np.uint8], slip: SlipCells, opacity: float
+) -> npt.NDArray[np.uint8]:
+    """Blend the slipping cells into a frame.
+
+    The cells are drawn opaque, once for their colour and once for their
+    opacity, and blended in one step: drawn translucent one by one, their
+    antialiased edges would show as seams, and cells where planes overlap
+    would brighten.
+
+    Parameters
+    ----------
+    image : np.ndarray
+        The frame, `(height, width, 3)`.
+    slip : SlipCells
+        The cells to draw.
+    opacity : float
+        Overall opacity.
+
+    Returns
+    -------
+    np.ndarray
+        The frame with the cells blended in.
+    """
+    # Only the cells' bounding box is drawn and blended: the fault usually
+    # covers a small part of the frame.
+    h, w = image.shape[:2]
+    low = np.floor(slip.quads.reshape(-1, 2).min(axis=0)).astype(int) - 2
+    high = np.ceil(slip.quads.reshape(-1, 2).max(axis=0)).astype(int) + 2
+    x0, y0 = np.maximum(low, 0)
+    x1, y1 = np.minimum(high, [w, h])
+    if x1 <= x0 or y1 <= y0:
+        return image
+    figure = Figure(figsize=((x1 - x0) / 100, (y1 - y0) / 100), dpi=100)
+    canvas = FigureCanvasAgg(figure)
+    ax = figure.add_axes((0, 0, 1, 1))
+    ax.axis("off")
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y1, y0)
+    figure.patch.set_facecolor("black")
+    cells = PolyCollection(list(slip.quads), linewidths=0.8, antialiaseds=True)
+    ax.add_collection(cells)
+    # The colour layer, opaque, then the opacity layer as grey.
+    opaque = slip.colours.copy()
+    opaque[:, 3] = 1.0
+    grey = np.ones_like(slip.colours)
+    grey[:, :3] = slip.colours[:, 3:].clip(0.0, 1.0)
+    layers = []
+    for colours in (opaque, grey):
+        rgba = [(r, g, b, a) for r, g, b, a in colours.tolist()]
+        cells.set_facecolor(rgba)
+        cells.set_edgecolor(rgba)
+        canvas.draw()
+        layers.append(np.asarray(canvas.buffer_rgba())[..., :3] / 255.0)
+    colour, alpha = (layer[: y1 - y0, : x1 - x0] for layer in layers)
+    alpha = alpha[..., :1] * opacity
+    image = image.copy()
+    box = image[y0:y1, x0:x1] / 255.0
+    image[y0:y1, x0:x1] = ((box * (1 - alpha) + colour * alpha) * 255).round()
+    return image
+
+
+def fault_slip(
+    scene: Scene, projector: Projector, time: float, exaggeration: float
+) -> SlipCells | None:
+    """Project the fault's cells, coloured by how far each has slipped.
+
+    Parameters
+    ----------
+    scene : Scene
+        The scene.
+    projector : Projector
+        The frame's projection.
+    time : float
+        Simulation time (s).
+    exaggeration : float
+        Vertical exaggeration.
+
+    Returns
+    -------
+    SlipCells | None
+        The slipping cells in view, or None if the SRF has no slip rates or
+        the rupture is drawn as a point.
+    """
+    slip = scene.rupture.slip
+    if slip is None or scene.rupture.is_point:
+        return None
+    level = slip.at(time) / (slip.peak or 1.0)
+    quads, levels, offset = [], [], 0
+    for corners in slip.corners:
+        rows, columns = corners.shape[0] - 1, corners.shape[1] - 1
+        flat = corners.reshape(-1, 2)
+        z = scene.height_at(flat[:, 0], flat[:, 1]) * exaggeration + 80.0
+        screen = projector(np.column_stack([flat, z]))
+        seen = visible(scene, projector.position, flat, exaggeration) & np.isfinite(
+            screen[:, 0]
+        )
+        screen = screen.reshape(rows + 1, columns + 1, 2)
+        seen = seen.reshape(rows + 1, columns + 1)
+        cell = level[offset : offset + rows * columns].reshape(rows, columns)
+        offset += rows * columns
+        shown = (
+            seen[:-1, :-1] & seen[:-1, 1:] & seen[1:, 1:] & seen[1:, :-1] & (cell > 0)
+        )
+        quads.append(
+            np.stack(
+                [screen[:-1, :-1], screen[:-1, 1:], screen[1:, 1:], screen[1:, :-1]],
+                axis=2,
+            )[shown]
+        )
+        levels.append(cell[shown])
+    level = np.clip(np.concatenate(levels), 0.0, 1.0)
+    colours = matplotlib.colormaps[SLIP_CMAP](level)
+    colours[:, 3] = SLIP_OPACITY * np.clip(level / SLIP_FADE, 0.0, 1.0)
+    return SlipCells(np.concatenate(quads), colours)
+
+
 def render_segment(job: Job) -> Path:
     """Render and encode one worker's frames.
 
@@ -1502,6 +1647,7 @@ def render_segment(job: Job) -> Path:
                 job.end_card.weak,
                 scale=job.end_card.scale,
                 planes=fault_planes(scene, projector, ex),
+                slip=fault_slip(scene, projector, frame.time, ex),
             ).tobytes()
         )
     encoder.stdin.close()

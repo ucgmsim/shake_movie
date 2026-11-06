@@ -22,7 +22,7 @@ says where the rest is:
 | `topo` image (z = 0, cycle 0) | SW4 `imagehdf5 mode=topo` | Terrain mesh and hillshade |
 | `surf_mag` images (z = 0, every 0.5 s) | SW4 `imagehdf5 mode=mag` | Shaking, interpolated in time to the frame rate |
 | `surf_hmax` image (z = 0, end) | SW4 `imagehdf5 mode=hmax` | Strongest shaking map, without intensity measures |
-| SRF (`rupturehdf5`) | the SRF SW4 ran | Fault trace, rupture timing, epicentre |
+| SRF (`rupturehdf5`) | the SRF SW4 ran | Fault trace, rupture timing, slip, epicentre |
 | Realisation JSON | the workflow | Magnitude, simulated domain, coastline |
 | `intensity_measures.h5` (`--intensity-measures`) | the workflow's `im-calc` | Strongest shaking map (broadband PGV) |
 
@@ -68,6 +68,10 @@ rounding (under 1 m).
   felt, so drawn as it is it would show nothing; scaled, the waves fill the
   same scale the final map is drawn on.
 - **Fault:** drawn grey, turning white as it ruptures ("Fault rupturing").
+  Its planes, seen from above, fill in with slip as the rupture runs, on
+  matplotlib's `hot`, integrating each SRF point's slip-rate pulse (`SR1`) from
+  its onset, as `rupture-view` in rupture_generator does. The final map shows
+  the planes as a plain outline instead.
 - **Ending:** a north-up map of the strongest broadband shaking on land
   (clipped to the coastline) on the same scale, with the word for each town's
   shaking (GeoNet's Weak, Light, Moderate, Strong, Severe, Extreme, from
