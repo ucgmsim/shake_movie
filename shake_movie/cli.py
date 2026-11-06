@@ -343,6 +343,7 @@ def plan_movie(
         terrain.grid_size,
         info.domain,
         scene.load_coastline(_coastline(coastline, info)),
+        scene.load_lakes(),
         rupture,
         name.title,
         name.location,

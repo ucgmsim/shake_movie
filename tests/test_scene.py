@@ -119,18 +119,29 @@ def test_towns_are_loaded_largest_first() -> None:
     assert any(town.name == "Kaikōura" for town in towns)
 
 
-def test_lakes_are_large_zero_patches_on_land() -> None:
-    """Lagoons at 0 m inside the coastline are lakes; the sea and puddles are not."""
-    elevation = np.full((60, 60), 50.0, dtype=np.float32)
-    land = np.ones_like(elevation)
-    land[:, 50:] = 0.0
-    elevation[:, 50:] = 0.0
-    elevation[10:35, 10:35] = 0.0
-    elevation[40:42, 40:42] = 0.0
-    lake = scene.lakes(elevation, land, cell_area=100.0**2)
-    assert lake[20, 20] > 0.9
-    assert lake[41, 41] < 0.1
-    assert lake[20, 55] < 0.1
+def test_vendored_lakes_cover_inland_and_coastal_lakes() -> None:
+    """The vendored lakes include high inland lakes and coastal lagoons."""
+    lakes = scene.load_lakes()
+    assert lakes.is_valid
+    taupo = shapely.Point(1_855_800, 5_700_800)
+    te_waihora = shapely.Point(1_560_400, 5_151_600)
+    assert lakes.contains(taupo) and lakes.contains(te_waihora)
+    assert not lakes.contains(shapely.Point(1_570_700, 5_180_200))  # Christchurch
+
+
+def test_coverage_rasterises_holes() -> None:
+    """Islands in a lake are left uncovered."""
+    lake = shapely.Polygon(
+        [(0, 0), (60, 0), (60, 60), (0, 60)], [[(20, 20), (40, 20), (40, 40), (20, 40)]]
+    )
+
+    def _to_pixels(easting: np.ndarray, northing: np.ndarray) -> tuple:
+        """Use metres as pixels, rows running south."""
+        return easting, 59 - northing
+
+    covered = scene.coverage(lake, (0, 0, 60, 60), _to_pixels, (60, 60))
+    assert covered[5, 5] > 0.9
+    assert covered[30, 30] < 0.1
 
 
 def test_scene_on_sw4_output(sw4_run: dict[str, Path], geometry: GridGeometry) -> None:
@@ -143,6 +154,7 @@ def test_scene_on_sw4_output(sw4_run: dict[str, Path], geometry: GridGeometry) -
         topo.grid_size,
         info.domain,
         scene.load_coastline(sw4_run["coastline"]),
+        scene.load_lakes(),
         scene.Rupture.from_srf(sw4_run["srf"]),
         "Mw 6.0 earthquake",
         "Somewhere",
