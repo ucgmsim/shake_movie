@@ -48,7 +48,7 @@ fallback_version = "0.0.0"
 find = { include = ["shake_movie*"] }
 
 [tool.setuptools.package-data]
-shake_movie = ["nz_places.csv", "branding/*"]
+shake_movie = ["nz_places.csv", "nz_lakes.wkb.gz", "branding/*"]
 
 [tool.deptry]
 optional_dependencies_dev_groups = ["test"]

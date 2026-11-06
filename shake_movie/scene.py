@@ -3,8 +3,10 @@
 The terrain is SW4's own `topo` image, on SW4's (rotated) grid. Land and sea
 come from a coastline (the nzcvm one the velocity model was built with, or
 LINZ's), not from elevation: NZCVM stores the sea as 0 m, the same height as much of the
-Canterbury Plains. Beyond the SW4 grid the map continues as flat context, so
-the coastline still frames the simulation.
+Canterbury Plains. Lakes come from LINZ's lake polygons, which also cover
+lagoons such as Te Waihora that the coastline counts as land. Beyond the SW4
+grid the map continues as flat context, so the coastline still frames the
+simulation.
 """
 
 import csv
@@ -35,6 +37,13 @@ LINZ_COASTLINE_URL = "https://www.dropbox.com/scl/fi/zkohh794y0s2189t7b1hi/NZ.gm
 """LINZ's NZ Coastlines and Islands Polygons (Topo 1:150k), CC BY 3.0 NZ, as
 GMT rings. The same copy `ucgmsim/workflow` reads its coastline from."""
 
+LAKES = "nz_lakes.wkb.gz"
+"""The vendored lakes: LINZ's NZ Lake Polygons (Topo 1:50k), CC BY 4.0, with
+lakes under 0.25 km^2 dropped and outlines simplified to 20 m, as gzipped WKB
+in NZTM. Rebuilt from the LDS shapefile with
+`ogr2ogr -dialect SQLite -sql 'SELECT ST_SimplifyPreserveTopology(geometry, 20)
+FROM "nz-lake-polygons-topo-150k" WHERE ST_Area(geometry) >= 250000'`."""
+
 PLACES = "nz_places.csv"
 """The vendored town list (OpenStreetMap, see the file's header)."""
 
@@ -49,10 +58,6 @@ CONTEXT_PAD = 200e3
 """Flat map shown around the SW4 grid (m)."""
 CONTEXT_RESOLUTION = 500.0
 """Resolution of the flat context map (m)."""
-LAKE_MAX_ELEVATION = 0.5
-"""Water inside the coastline sits at 0 m in NZCVM's surface (m)."""
-LAKE_MIN_AREA = 4e6
-"""Smallest patch of 0 m ground inside the coastline drawn as a lake (m^2)."""
 PixelMap = Callable[
     [npt.NDArray[np.float64], npt.NDArray[np.float64]],
     tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]],
@@ -181,6 +186,18 @@ def inset_outline(coastline: shapely.Geometry) -> list[npt.NDArray[np.float64]]:
     ]
 
 
+def load_lakes() -> shapely.Geometry:
+    """Load the vendored New Zealand lakes.
+
+    Returns
+    -------
+    shapely.Geometry
+        Lake polygons in NZTM.
+    """
+    data = resources.files("shake_movie").joinpath(LAKES).read_bytes()
+    return shapely.from_wkb(gzip.decompress(data))
+
+
 def cache_directory() -> Path:
     """Find where downloaded map data is kept.
 
@@ -254,18 +271,18 @@ def rasterise(
     return (np.asarray(canvas.buffer_rgba())[..., 0] / 255).astype(np.float32)
 
 
-def land_fraction(
-    coastline: shapely.Geometry,
+def coverage(
+    polygons: shapely.Geometry,
     bounds: tuple[float, float, float, float],
     to_pixels: PixelMap,
     shape: tuple[int, int],
 ) -> npt.NDArray[np.float32]:
-    """Rasterise the coastline's land onto a grid.
+    """Rasterise polygons, such as land or lakes, onto a grid.
 
     Parameters
     ----------
-    coastline : shapely.Geometry
-        Land polygons in NZTM.
+    polygons : shapely.Geometry
+        Polygons in NZTM.
     bounds : tuple[float, float, float, float]
         NZTM bounds `(min_e, min_n, max_e, max_n)` covering the grid.
     to_pixels : PixelMap
@@ -276,10 +293,10 @@ def land_fraction(
     Returns
     -------
     np.ndarray
-        Land fraction in [0, 1] for each grid point.
+        Fraction of each grid point the polygons cover, in [0, 1].
     """
-    clipped = shapely.clip_by_rect(coastline, *bounds)
-    polygons = []
+    clipped = shapely.clip_by_rect(polygons, *bounds)
+    pixel_polygons = []
     for polygon in shapely.get_parts(clipped):
         if polygon.geom_type != "Polygon" or polygon.is_empty:
             continue
@@ -288,41 +305,8 @@ def land_fraction(
             coordinates = np.asarray(ring.coords)
             column, row = to_pixels(coordinates[:, 0], coordinates[:, 1])
             rings.append(np.column_stack([column, row]))
-        polygons.append(rings)
-    return rasterise(polygons, shape)
-
-
-def lakes(
-    elevation: npt.NDArray[np.float32], land: npt.NDArray[np.float32], cell_area: float
-) -> npt.NDArray[np.float32]:
-    """Find lakes and lagoons: large patches of 0 m ground inside the coastline.
-
-    NZCVM's coastline counts lagoons such as Te Waihora as land, but its
-    surface puts their water at 0 m, like the sea.
-
-    Parameters
-    ----------
-    elevation : np.ndarray
-        Ground elevation (m).
-    land : np.ndarray
-        Land fraction from the coastline.
-    cell_area : float
-        Area of one cell (m^2).
-
-    Returns
-    -------
-    np.ndarray
-        Lake fraction in [0, 1] for each cell.
-    """
-    water = ndimage.binary_opening(
-        (elevation <= LAKE_MAX_ELEVATION) & (land > 0.5), iterations=1
-    )
-    labels, count = ndimage.label(water)
-    if count == 0:
-        return np.zeros_like(elevation, dtype=np.float32)
-    sizes = ndimage.sum(water, labels, range(1, count + 1)) * cell_area
-    keep = np.isin(labels, 1 + np.flatnonzero(sizes >= LAKE_MIN_AREA))
-    return ndimage.gaussian_filter(keep.astype(np.float32), 0.7)
+        pixel_polygons.append(rings)
+    return rasterise(pixel_polygons, shape)
 
 
 def hillshade(
@@ -657,6 +641,7 @@ def build_scene(
     spacing: float,
     domain: npt.NDArray[np.float64],
     coastline: shapely.Geometry,
+    lakes: shapely.Geometry,
     rupture: Rupture,
     title: str,
     location: str,
@@ -676,6 +661,8 @@ def build_scene(
         NZTM corners of the simulated domain, `(4, 2)`.
     coastline : shapely.Geometry
         Land polygons in NZTM.
+    lakes : shapely.Geometry
+        Lake polygons in NZTM.
     rupture : Rupture
         The rupture.
     title : str
@@ -734,8 +721,8 @@ def build_scene(
     # Terrain texture on SW4's grid.
     t = _stride(max(ni, nj), spacing, spacing, TEXTURE_MAX_PIXELS)
     elevation = topo[::t, ::t]
-    land = land_fraction(coastline, grid_bounds, _grid_pixels(t), elevation.shape)
-    lake = lakes(elevation, land, (spacing * t) ** 2)
+    land = coverage(coastline, grid_bounds, _grid_pixels(t), elevation.shape)
+    lake = coverage(lakes, grid_bounds, _grid_pixels(t), elevation.shape)
     ground = np.where(land > 0.5, np.maximum(elevation, 0.0), 0.0).astype(np.float32)
     shade = hillshade(elevation, spacing * t, geometry.azimuth)
     rgb = tint(elevation, land, lake, shade, spacing * t)
@@ -796,13 +783,12 @@ def build_scene(
             (context_bounds[3] - northing) / CONTEXT_RESOLUTION - 0.5,
         )
 
-    context_land = land_fraction(
-        coastline, context_bounds, _context_pixels, (rows, columns)
-    )
+    context_land = coverage(coastline, context_bounds, _context_pixels, (rows, columns))
+    context_lake = coverage(lakes, context_bounds, _context_pixels, (rows, columns))
     context_rgb = tint(
         np.zeros((rows, columns), np.float32),
         context_land,
-        np.zeros((rows, columns), np.float32),
+        context_lake,
         None,
         CONTEXT_RESOLUTION,
     )

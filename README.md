@@ -51,8 +51,8 @@ rounding (under 1 m).
 - **Terrain:** a muted hypsometric tint from a lowland green, with a baked
   hillshade and 2x vertical exaggeration. Land and sea come from the coastline,
   never from elevation: NZCVM stores the sea as 0 m, the same height as much of
-  the Canterbury Plains. Lagoons such as Te Waihora are found as large 0 m
-  patches inside the coastline.
+  the Canterbury Plains. Lakes, including lagoons such as Te Waihora that the
+  coastline counts as land, come from LINZ's lake polygons.
 - **Shaking:** ground velocity in cm/s on one colour scale for the whole
   movie, in magma, see-through at its low end and faint over the sea. The
   scale tops out at the strongest broadband shaking on land (`rotd50` PGV from
@@ -137,6 +137,9 @@ libgl1-mesa-dri`, or `libosmesa6`).
   one that exists. Otherwise [LINZ NZ Coastlines and Islands Polygons
   (Topo 1:150k)](https://data.linz.govt.nz/layer/1153), CC BY 3.0 NZ,
   downloaded once to `~/.cache/shake_movie`.
+- Lakes (`shake_movie/nz_lakes.wkb.gz`): [LINZ NZ Lake Polygons (Topo
+  1:50k)](https://data.linz.govt.nz/layer/50293), CC BY 4.0, keeping lakes of
+  0.25 km^2 or more with outlines simplified to 20 m.
 - Towns (`shake_movie/nz_places.csv`): cities, towns and villages with a
   population from OpenStreetMap, © OpenStreetMap contributors, ODbL 1.0.
 - Places and dates: GeoNet and OpenStreetMap Nominatim, as above.
