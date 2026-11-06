@@ -52,7 +52,9 @@ rounding (under 1 m).
   hillshade and 2x vertical exaggeration. Land and sea come from the coastline,
   never from elevation: NZCVM stores the sea as 0 m, the same height as much of
   the Canterbury Plains. Lakes, including lagoons such as Te Waihora that the
-  coastline counts as land, come from LINZ's lake polygons.
+  coastline counts as land, and wide rivers such as Canterbury's braided
+  riverbeds come from LINZ's lake and river polygons. State highways are drawn
+  as faint light lines on the terrain.
 - **Shaking:** ground velocity in cm/s on one colour scale for the whole
   movie, in magma, see-through at its low end and faint over the sea. The
   scale tops out at the strongest broadband shaking on land (`rotd50` PGV from
@@ -140,6 +142,12 @@ libgl1-mesa-dri`, or `libosmesa6`).
 - Lakes (`shake_movie/nz_lakes.wkb.gz`): [LINZ NZ Lake Polygons (Topo
   1:50k)](https://data.linz.govt.nz/layer/50293), CC BY 4.0, keeping lakes of
   0.25 km^2 or more with outlines simplified to 20 m.
+- Rivers (`shake_movie/nz_rivers.wkb.gz`): [LINZ NZ River Polygons (Topo
+  1:50k)](https://data.linz.govt.nz/layer/50328), CC BY 4.0, keeping pieces of
+  0.1 km^2 or more with outlines simplified to 30 m.
+- Roads (`shake_movie/nz_highways.wkb.gz`): the state highways of [LINZ NZ
+  Road Centrelines (Topo 1:50k)](https://data.linz.govt.nz/layer/50329), CC BY
+  4.0, simplified to 20 m.
 - Towns (`shake_movie/nz_places.csv`): cities, towns and villages with a
   population from OpenStreetMap, © OpenStreetMap contributors, ODbL 1.0.
 - Places and dates: GeoNet and OpenStreetMap Nominatim, as above.

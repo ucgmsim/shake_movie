@@ -129,6 +129,32 @@ def test_vendored_lakes_cover_inland_and_coastal_lakes() -> None:
     assert not lakes.contains(shapely.Point(1_570_700, 5_180_200))  # Christchurch
 
 
+def test_vendored_water_and_roads() -> None:
+    """Rivers join the lakes, and roads are the state highway network."""
+    water = scene.load_water()
+    assert water.is_valid
+    assert water.contains(shapely.Point(1_514_400, 5_221_070))  # Waimakariri
+    assert water.contains(shapely.Point(1_855_800, 5_700_800))  # Taupō
+    roads = scene.load_roads()
+    assert roads.geom_type == "MultiLineString"
+    assert 10_000e3 < roads.length < 12_500e3
+    assert roads.distance(shapely.Point(1_570_700, 5_180_200)) < 3e3  # Christchurch
+
+
+def test_line_coverage_draws_lines_at_width() -> None:
+    """A road across the grid covers its own pixels and none far away."""
+    road = shapely.LineString([(0, 30), (60, 30)])
+
+    def _to_pixels(easting: np.ndarray, northing: np.ndarray) -> tuple:
+        """Use metres as pixels, rows running south."""
+        return easting, 59 - northing
+
+    covered = scene.line_coverage(road, (0, 0, 60, 60), _to_pixels, (60, 60), 3.0)
+    assert covered[29, 30] > 0.9
+    assert covered[20, 30] == 0.0
+    assert covered[:, 30].sum() == pytest.approx(3.0, abs=0.5)
+
+
 def test_coverage_rasterises_holes() -> None:
     """Islands in a lake are left uncovered."""
     lake = shapely.Polygon(
@@ -154,7 +180,8 @@ def test_scene_on_sw4_output(sw4_run: dict[str, Path], geometry: GridGeometry) -
         topo.grid_size,
         info.domain,
         scene.load_coastline(sw4_run["coastline"]),
-        scene.load_lakes(),
+        scene.load_water(),
+        scene.load_roads(),
         scene.Rupture.from_srf(sw4_run["srf"]),
         "Mw 6.0 earthquake",
         "Somewhere",

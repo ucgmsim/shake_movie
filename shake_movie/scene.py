@@ -3,10 +3,10 @@
 The terrain is SW4's own `topo` image, on SW4's (rotated) grid. Land and sea
 come from a coastline (the nzcvm one the velocity model was built with, or
 LINZ's), not from elevation: NZCVM stores the sea as 0 m, the same height as much of the
-Canterbury Plains. Lakes come from LINZ's lake polygons, which also cover
-lagoons such as Te Waihora that the coastline counts as land. Beyond the SW4
-grid the map continues as flat context, so the coastline still frames the
-simulation.
+Canterbury Plains. Lakes and rivers come from LINZ's lake and river polygons
+(the lakes also cover lagoons such as Te Waihora that the coastline counts as
+land), and roads from LINZ's state highways. Beyond the SW4 grid the map
+continues as flat context, so the coastline still frames the simulation.
 """
 
 import csv
@@ -23,7 +23,9 @@ import matplotlib
 import numpy as np
 import numpy.typing as npt
 import shapely
+from matplotlib.axes import Axes
 from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
@@ -43,6 +45,15 @@ lakes under 0.25 km^2 dropped and outlines simplified to 20 m, as gzipped WKB
 in NZTM. Rebuilt from the LDS shapefile with
 `ogr2ogr -dialect SQLite -sql 'SELECT ST_SimplifyPreserveTopology(geometry, 20)
 FROM "nz-lake-polygons-topo-150k" WHERE ST_Area(geometry) >= 250000'`."""
+RIVERS = "nz_rivers.wkb.gz"
+"""The vendored rivers: LINZ's NZ River Polygons (Topo 1:50k), CC BY 4.0, the
+wide rivers mapped as areas, such as Canterbury's braided riverbeds. Reprojected
+to NZTM and simplified to 20 m with `ogr2ogr`, then unioned, pieces under
+0.1 km^2 dropped and simplified to 30 m, as gzipped WKB in NZTM."""
+HIGHWAYS = "nz_highways.wkb.gz"
+"""The vendored roads: the state highways (`hway_num` set) of LINZ's NZ Road
+Centrelines (Topo 1:50k), CC BY 4.0, reprojected to NZTM, simplified to 20 m
+and merged into lines, as gzipped WKB in NZTM."""
 
 PLACES = "nz_places.csv"
 """The vendored town list (OpenStreetMap, see the file's header)."""
@@ -82,6 +93,8 @@ INSET_TOLERANCE = 2_000.0
 """How far (m) the inset's simplified coastline may stray from the real one."""
 INSET_MIN_AREA = 30e6
 """Smallest island (m^2) drawn on the inset map."""
+ROAD_WIDTH = 120.0
+"""Width (m) roads are drawn on the terrain; never under a texture pixel."""
 FOOTPRINT_CLOSING = 250.0
 """Gap (m) between neighbouring fault planes closed when outlining them."""
 FOOTPRINT_SPACING = 250.0
@@ -186,6 +199,12 @@ def inset_outline(coastline: shapely.Geometry) -> list[npt.NDArray[np.float64]]:
     ]
 
 
+def _load_vendored(name: str) -> shapely.Geometry:
+    """Load a vendored gzipped WKB geometry from the package."""
+    data = resources.files("shake_movie").joinpath(name).read_bytes()
+    return shapely.from_wkb(gzip.decompress(data))
+
+
 def load_lakes() -> shapely.Geometry:
     """Load the vendored New Zealand lakes.
 
@@ -194,8 +213,29 @@ def load_lakes() -> shapely.Geometry:
     shapely.Geometry
         Lake polygons in NZTM.
     """
-    data = resources.files("shake_movie").joinpath(LAKES).read_bytes()
-    return shapely.from_wkb(gzip.decompress(data))
+    return _load_vendored(LAKES)
+
+
+def load_water() -> shapely.Geometry:
+    """Load the vendored New Zealand lakes and rivers together.
+
+    Returns
+    -------
+    shapely.Geometry
+        Lake and river polygons in NZTM.
+    """
+    return shapely.union(_load_vendored(LAKES), _load_vendored(RIVERS))
+
+
+def load_roads() -> shapely.Geometry:
+    """Load the vendored New Zealand state highways.
+
+    Returns
+    -------
+    shapely.Geometry
+        Road centrelines in NZTM.
+    """
+    return _load_vendored(HIGHWAYS)
 
 
 def cache_directory() -> Path:
@@ -246,14 +286,7 @@ def rasterise(
     np.ndarray
         Coverage fraction in [0, 1] for each pixel.
     """
-    rows, columns = shape
-    figure = Figure(figsize=(columns / 100, rows / 100), dpi=100)
-    canvas = FigureCanvasAgg(figure)
-    axes = figure.add_axes((0, 0, 1, 1))
-    axes.set_xlim(-0.5, columns - 0.5)
-    axes.set_ylim(rows - 0.5, -0.5)
-    axes.axis("off")
-    figure.patch.set_facecolor("black")
+    canvas, axes = _raster_canvas(shape)
     for rings in polygons:
         vertices = np.concatenate(rings)
         codes = np.concatenate(
@@ -264,9 +297,69 @@ def rasterise(
                 for ring in rings
             ]
         )
-        axes.add_patch(
+        # add_artist, not add_patch: the limits are fixed, and updating them
+        # for every polygon dominates the cost with hundreds of lakes.
+        axes.add_artist(
             PathPatch(MplPath(vertices, codes), facecolor="white", edgecolor="none")
         )
+    canvas.draw()
+    return (np.asarray(canvas.buffer_rgba())[..., 0] / 255).astype(np.float32)
+
+
+def _raster_canvas(shape: tuple[int, int]) -> tuple[FigureCanvasAgg, Axes]:
+    """Make a black canvas with one pixel per raster cell, rows running down."""
+    rows, columns = shape
+    figure = Figure(figsize=(columns / 100, rows / 100), dpi=100)
+    canvas = FigureCanvasAgg(figure)
+    axes = figure.add_axes((0, 0, 1, 1))
+    axes.set_xlim(-0.5, columns - 0.5)
+    axes.set_ylim(rows - 0.5, -0.5)
+    axes.axis("off")
+    figure.patch.set_facecolor("black")
+    return canvas, axes
+
+
+def line_coverage(
+    lines: shapely.Geometry,
+    bounds: tuple[float, float, float, float],
+    to_pixels: PixelMap,
+    shape: tuple[int, int],
+    width: float,
+) -> npt.NDArray[np.float32]:
+    """Rasterise lines, such as roads, onto a grid, with antialiased edges.
+
+    Parameters
+    ----------
+    lines : shapely.Geometry
+        Lines in NZTM.
+    bounds : tuple[float, float, float, float]
+        NZTM bounds `(min_e, min_n, max_e, max_n)` covering the grid.
+    to_pixels : PixelMap
+        Maps NZTM `(easting, northing)` arrays to `(column, row)` pixels.
+    shape : tuple[int, int]
+        Grid shape `(rows, columns)`.
+    width : float
+        Line width (pixels).
+
+    Returns
+    -------
+    np.ndarray
+        Fraction of each grid point the lines cover, in [0, 1].
+    """
+    segments = []
+    for line in shapely.get_parts(shapely.clip_by_rect(lines, *bounds)):
+        if line.geom_type != "LineString" or line.is_empty:
+            continue
+        coordinates = np.asarray(line.coords)
+        column, row = to_pixels(coordinates[:, 0], coordinates[:, 1])
+        segments.append(np.column_stack([column, row]))
+    canvas, axes = _raster_canvas(shape)
+    # Agg draws widths in points; at 100 dpi a pixel is 0.72 points.
+    axes.add_collection(
+        LineCollection(
+            segments, colors="white", linewidths=width * 0.72, capstyle="round"
+        )
+    )
     canvas.draw()
     return (np.asarray(canvas.buffer_rgba())[..., 0] / 255).astype(np.float32)
 
@@ -277,7 +370,7 @@ def coverage(
     to_pixels: PixelMap,
     shape: tuple[int, int],
 ) -> npt.NDArray[np.float32]:
-    """Rasterise polygons, such as land or lakes, onto a grid.
+    """Rasterise polygons, such as land or water, onto a grid.
 
     Parameters
     ----------
@@ -365,7 +458,7 @@ def hex_rgb(colour: str) -> npt.NDArray[np.float32]:
 def tint(
     elevation: npt.NDArray[np.float32],
     land: npt.NDArray[np.float32],
-    lake: npt.NDArray[np.float32],
+    water: npt.NDArray[np.float32],
     shade: npt.NDArray[np.float32] | None,
     spacing: float,
 ) -> npt.NDArray[np.float32]:
@@ -377,8 +470,8 @@ def tint(
         Elevation (m).
     land : np.ndarray
         Land fraction.
-    lake : np.ndarray
-        Lake fraction.
+    water : np.ndarray
+        Lake and river fraction.
     shade : np.ndarray | None
         Hillshade, or None for flat ground.
     spacing : float
@@ -403,7 +496,7 @@ def tint(
     rgb_sea = hex_rgb(palette.SEA_NEAR) * (1 - k) + hex_rgb(palette.SEA_FAR) * k
     a = land[..., None]
     rgb = rgb_land * a + rgb_sea * (1 - a)
-    w = (lake * land)[..., None]
+    w = (water * land)[..., None]
     return rgb * (1 - w) + hex_rgb(palette.LAKE) * w
 
 
@@ -641,7 +734,8 @@ def build_scene(
     spacing: float,
     domain: npt.NDArray[np.float64],
     coastline: shapely.Geometry,
-    lakes: shapely.Geometry,
+    water: shapely.Geometry,
+    roads: shapely.Geometry,
     rupture: Rupture,
     title: str,
     location: str,
@@ -661,8 +755,10 @@ def build_scene(
         NZTM corners of the simulated domain, `(4, 2)`.
     coastline : shapely.Geometry
         Land polygons in NZTM.
-    lakes : shapely.Geometry
-        Lake polygons in NZTM.
+    water : shapely.Geometry
+        Lake and river polygons in NZTM.
+    roads : shapely.Geometry
+        Road centrelines in NZTM.
     rupture : Rupture
         The rupture.
     title : str
@@ -722,10 +818,19 @@ def build_scene(
     t = _stride(max(ni, nj), spacing, spacing, TEXTURE_MAX_PIXELS)
     elevation = topo[::t, ::t]
     land = coverage(coastline, grid_bounds, _grid_pixels(t), elevation.shape)
-    lake = coverage(lakes, grid_bounds, _grid_pixels(t), elevation.shape)
+    lake = coverage(water, grid_bounds, _grid_pixels(t), elevation.shape)
     ground = np.where(land > 0.5, np.maximum(elevation, 0.0), 0.0).astype(np.float32)
     shade = hillshade(elevation, spacing * t, geometry.azimuth)
     rgb = tint(elevation, land, lake, shade, spacing * t)
+    road = land * line_coverage(
+        roads,
+        grid_bounds,
+        _grid_pixels(t),
+        elevation.shape,
+        max(1.0, ROAD_WIDTH / (spacing * t)),
+    )
+    road = (road * palette.ROAD_OPACITY)[..., None]
+    rgb = rgb * (1 - road) + hex_rgb(palette.ROAD) * road
     ti, tj = np.meshgrid(
         np.arange(elevation.shape[0]) * t,
         np.arange(elevation.shape[1]) * t,
@@ -784,7 +889,7 @@ def build_scene(
         )
 
     context_land = coverage(coastline, context_bounds, _context_pixels, (rows, columns))
-    context_lake = coverage(lakes, context_bounds, _context_pixels, (rows, columns))
+    context_lake = coverage(water, context_bounds, _context_pixels, (rows, columns))
     context_rgb = tint(
         np.zeros((rows, columns), np.float32),
         context_land,
