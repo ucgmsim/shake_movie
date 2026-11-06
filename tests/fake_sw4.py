@@ -84,6 +84,8 @@ def write_srf(
             npt.NDArray[np.float64],
         ]
     ],
+    slip: list[tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]] | None = None,
+    dt: float = 0.05,
 ) -> Path:
     """Write an SW4 `rupturehdf5` SRF with the fields the movie reads.
 
@@ -94,28 +96,56 @@ def write_srf(
     planes : list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]
         Per plane: longitude, latitude, depth (km) and rupture time (s), each
         `(ndip, nstk)` with the first row shallowest.
+    slip : list[tuple[np.ndarray, np.ndarray]] | None
+        Per plane: each point's slip and rise time (s), `(ndip, nstk)`. Each
+        point slips in a triangular slip-rate pulse `dt` apart (`SR1`). None
+        writes no slip rates, as older SRFs have none.
+    dt : float
+        Slip-rate sample spacing (s).
 
     Returns
     -------
     Path
         The written file.
     """
-    point_dtype = np.dtype([(name, "<f4") for name in ("LON", "LAT", "DEP", "TINIT")])
+    names = ["LON", "LAT", "DEP", "TINIT"]
+    if slip is not None:
+        names += ["DT", "SLIP1", "NT1"]
+    point_dtype = np.dtype(
+        [(name, "<i4" if name == "NT1" else "<f4") for name in names]
+    )
     plane_dtype = np.dtype([("NSTK", "<i4"), ("NDIP", "<i4")])
     points = []
     headers = []
-    for lon, lat, depth, tinit in planes:
+    rates = []
+    for k, (lon, lat, depth, tinit) in enumerate(planes):
         ndip, nstk = lon.shape
         block = np.zeros(ndip * nstk, dtype=point_dtype)
         for name, values in zip(
             ("LON", "LAT", "DEP", "TINIT"), (lon, lat, depth, tinit), strict=True
         ):
             block[name] = values.ravel()
+        if slip is not None:
+            amount, rise = (values.ravel() for values in slip[k])
+            block["DT"] = dt
+            block["SLIP1"] = amount
+            for index, (total, duration) in enumerate(zip(amount, rise, strict=True)):
+                count = max(2, round(duration / dt)) if total > 0 else 0
+                triangle = 1 - np.abs(np.linspace(-1, 1, count)) if count else []
+                pulse = np.asarray(triangle, dtype=np.float64)
+                if count:
+                    pulse *= total / (pulse.sum() * dt)
+                block["NT1"][index] = count
+                rates.append(pulse)
         points.append(block)
         headers.append((nstk, ndip))
     with h5py.File(path, "w") as handle:
         handle.attrs["PLANE"] = np.array(headers, dtype=plane_dtype)
         handle.create_dataset("POINTS", data=np.concatenate(points))
+        if slip is not None:
+            handle.create_dataset(
+                "SR1", data=np.concatenate([[], *rates]).astype(np.float32)
+            )
     return path
 
 

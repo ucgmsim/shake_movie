@@ -40,6 +40,65 @@ def test_tiny_ruptures_are_points(tmp_path: Path) -> None:
     assert scene.Rupture.from_srf(srf).is_point
 
 
+def _slipping_plane(
+    tmp_path: Path, nstk: int = 4, ndip: int = 3
+) -> tuple[Path, np.ndarray, np.ndarray]:
+    """Write an SRF plane whose points slip 1 m more per column, one second
+    after another, each in a 1 s pulse."""
+    lon = np.tile(np.linspace(172.0, 172.1, nstk), (ndip, 1))
+    lat = np.tile(np.linspace(-43.0, -43.02, ndip)[:, None], (1, nstk))
+    tinit = np.tile(np.arange(nstk, dtype=float), (ndip, 1))
+    slip = np.tile(np.arange(1.0, nstk + 1), (ndip, 1))
+    srf = fake_sw4.write_srf(
+        tmp_path / "slip.h5",
+        [(lon, lat, np.ones_like(lon), tinit)],
+        slip=[(slip, np.ones_like(slip))],
+    )
+    return srf, tinit, slip
+
+
+def test_slip_follows_each_points_pulse(tmp_path: Path) -> None:
+    """Each cell slips from its onset through its pulse to its total."""
+    srf, _, slip = _slipping_plane(tmp_path)
+    history = scene.Rupture.from_srf(srf).slip
+    assert history is not None
+    (corners,) = history.corners
+    assert corners.shape == (4, 5, 2)
+    assert history.peak == pytest.approx(4.0)
+    np.testing.assert_allclose(history.at(-1.0), 0.0)
+    np.testing.assert_allclose(history.at(100.0), slip.ravel(), rtol=1e-4)
+    # Halfway through a symmetric pulse, half the slip is done.
+    midway = history.at(1.5).reshape(slip.shape)
+    np.testing.assert_allclose(midway[:, 1], slip[:, 1] / 2, rtol=0.05)
+    np.testing.assert_allclose(midway[:, 0], slip[:, 0], rtol=1e-4)
+    np.testing.assert_allclose(midway[:, 2:], 0.0)
+
+
+def test_large_srfs_slip_in_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Past `MAX_SLIP_CELLS` points, cells are blocks with their mean slip."""
+    monkeypatch.setattr(scene, "MAX_SLIP_CELLS", 4)
+    srf, _, _ = _slipping_plane(tmp_path, nstk=6, ndip=4)
+    history = scene.Rupture.from_srf(srf).slip
+    assert history is not None
+    (corners,) = history.corners
+    # 24 points over at most 4 cells: blocks of 3 x 3, the last ones short.
+    assert corners.shape == (3, 3, 2)
+    np.testing.assert_allclose(history.at(100.0), [2.0, 5.0, 2.0, 5.0], rtol=1e-4)
+    assert history.peak == pytest.approx(5.0)
+
+
+def test_srfs_without_slip_rates_have_no_slip(tmp_path: Path) -> None:
+    """An SRF with no slip-rate pulses still gives the fault, without slip."""
+    lon = np.tile(np.linspace(172.0, 172.1, 4), (2, 1))
+    srf = fake_sw4.write_srf(
+        tmp_path / "plain.h5",
+        [(lon, np.full_like(lon, -43.0), np.ones_like(lon), np.zeros_like(lon))],
+    )
+    assert scene.Rupture.from_srf(srf).slip is None
+
+
 def test_multiple_planes_become_segments(tmp_path: Path) -> None:
     """Each SRF plane becomes its own fault segment."""
     planes = []

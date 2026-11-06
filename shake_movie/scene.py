@@ -95,6 +95,10 @@ INSET_MIN_AREA = 30e6
 """Smallest island (m^2) drawn on the inset map."""
 ROAD_WIDTH = 120.0
 """Width (m) roads are drawn on the terrain; never under a texture pixel."""
+SLIP_SAMPLES = 32
+"""Samples kept of each SRF point's slip history, spread over its own pulse."""
+MAX_SLIP_CELLS = 5000
+"""Most fault cells drawn slipping; larger SRFs are drawn in blocks of points."""
 FOOTPRINT_CLOSING = 250.0
 """Gap (m) between neighbouring fault planes closed when outlining them."""
 FOOTPRINT_SPACING = 250.0
@@ -523,6 +527,165 @@ def dim(
     return rgb * (1 - a) + dimmed * a
 
 
+def _cell_corners(centres: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Corners of the cells around a grid of cell centres, extrapolated at the edges.
+
+    Parameters
+    ----------
+    centres : np.ndarray
+        Cell centres `(rows, columns, 2)`, at least two each way.
+
+    Returns
+    -------
+    np.ndarray
+        Cell corners `(rows + 1, columns + 1, 2)`.
+    """
+
+    def _pad(grid: npt.NDArray[np.float64], axis: int) -> npt.NDArray[np.float64]:
+        """Extend a grid by one cell at each end of an axis, linearly."""
+        first = 2 * np.take(grid, [0], axis) - np.take(grid, [1], axis)
+        last = 2 * np.take(grid, [-1], axis) - np.take(grid, [-2], axis)
+        return np.concatenate([first, grid, last], axis=axis)
+
+    padded = _pad(_pad(centres, 0), 1)
+    return (padded[:-1, :-1] + padded[1:, :-1] + padded[:-1, 1:] + padded[1:, 1:]) / 4
+
+
+@dataclasses.dataclass
+class Slip:
+    """How far the fault has slipped over time, from the SRF's slip-rate pulses."""
+
+    corners: list[npt.NDArray[np.float64]]
+    """Per SRF plane: NZTM corners of the cells drawn, `(rows + 1, columns + 1,
+    2)`, the first row shallowest. A cell is one SRF point, or a block of them
+    for SRFs with more than `MAX_SLIP_CELLS` points."""
+    cell: npt.NDArray[np.int64]
+    """The cell each SRF point lies in, numbering the planes' cells in turn,
+    row by row."""
+    onset: npt.NDArray[np.float32]
+    """When each point starts to slip (s)."""
+    duration: npt.NDArray[np.float32]
+    """How long each point's slip-rate pulse lasts (s)."""
+    history: npt.NDArray[np.float32]
+    """Each point's slip so far, `(points, SLIP_SAMPLES)`, sampled evenly from
+    its onset to the end of its pulse."""
+    peak: float
+    """Largest slip of any cell once the rupture is over."""
+
+    def at(self, time: float) -> npt.NDArray[np.float64]:
+        """Each cell's mean slip at a time.
+
+        Parameters
+        ----------
+        time : float
+            Simulation time (s).
+
+        Returns
+        -------
+        np.ndarray
+            Slip so far of each cell, in the SRF's units.
+        """
+        last = SLIP_SAMPLES - 1
+        elapsed = time - self.onset
+        position = np.where(
+            self.duration > 0,
+            elapsed / np.maximum(self.duration, 1e-9) * last,
+            last,
+        )
+        position = np.clip(position, 0, last)
+        below = np.minimum(position.astype(np.int64), last - 1)
+        fraction = position - below
+        rows = np.arange(len(self.history))
+        slipped = (
+            self.history[rows, below] * (1 - fraction)
+            + self.history[rows, below + 1] * fraction
+        )
+        slipped = np.where(elapsed >= 0, slipped, 0.0)
+        cells = int(self.cell.max()) + 1
+        return np.bincount(self.cell, slipped, cells) / np.bincount(
+            self.cell, minlength=cells
+        )
+
+    @classmethod
+    def from_points(
+        cls,
+        points: npt.NDArray[np.void],
+        rates: npt.NDArray[np.float32],
+        shapes: list[tuple[int, int]],
+    ) -> "Slip | None":
+        """Build the slip history from an SRF's points and slip rates.
+
+        Parameters
+        ----------
+        points : np.ndarray
+            The SRF's `POINTS` records.
+        rates : np.ndarray
+            The SRF's `SR1` slip rates: each point's pulse in turn, `NT1`
+            samples `DT` apart from its `TINIT`.
+        shapes : list[tuple[int, int]]
+            Each plane's `(NDIP, NSTK)`.
+
+        Returns
+        -------
+        Slip | None
+            The slip history, or None if a plane is too thin to draw.
+        """
+        if any(min(shape) < 2 for shape in shapes):
+            return None
+        to_nztm = Transformer.from_crs("EPSG:4326", NZTM, always_xy=True)
+        block = max(1, int(np.ceil(np.sqrt(len(points) / MAX_SLIP_CELLS))))
+        corners, cell, offset, cells = [], [], 0, 0
+        for ndip, nstk in shapes:
+            plane = points[offset : offset + ndip * nstk]
+            offset += ndip * nstk
+            easting, northing = to_nztm.transform(plane["LON"], plane["LAT"])
+            centres = np.stack([easting, northing], axis=-1).reshape(ndip, nstk, 2)
+            fine = _cell_corners(centres)
+            rows = np.minimum(np.arange(-(-ndip // block) + 1) * block, ndip)
+            columns = np.minimum(np.arange(-(-nstk // block) + 1) * block, nstk)
+            corners.append(fine[np.ix_(rows, columns)])
+            i, j = np.divmod(np.arange(ndip * nstk), nstk)
+            cell.append(cells + (i // block) * (len(columns) - 1) + j // block)
+            cells += (len(rows) - 1) * (len(columns) - 1)
+
+        total = np.sqrt(
+            sum(
+                points[name].astype(np.float64) ** 2
+                for name in ("SLIP1", "SLIP2", "SLIP3")
+                if name in (points.dtype.names or ())
+            )
+        )
+        counts = points["NT1"].astype(np.int64)
+        dt = points["DT"].astype(np.float64)
+        starts = np.concatenate([[0], np.cumsum(counts)])
+        history = np.empty((len(points), SLIP_SAMPLES), np.float32)
+        steps = np.linspace(0.0, 1.0, SLIP_SAMPLES)
+        for k, (start, count) in enumerate(
+            zip(starts[:-1].tolist(), counts.tolist(), strict=True)
+        ):
+            pulse = np.concatenate([[0.0], np.cumsum(rates[start : start + count])])
+            if count == 0 or not pulse[-1] > 0:
+                # No pulse to follow: the point slips all at once.
+                history[k] = np.where(steps > 0, total[k], 0.0)
+                counts[k] = 0
+                continue
+            history[k] = np.interp(steps * count, np.arange(count + 1), pulse) * (
+                total[k] / pulse[-1]
+            )
+        cell_index = np.concatenate(cell)
+        final = np.bincount(cell_index, total, cells) / np.bincount(
+            cell_index, minlength=cells
+        )
+        return cls(
+            corners,
+            cell_index,
+            points["TINIT"].astype(np.float32),
+            (counts * dt).astype(np.float32),
+            history,
+            float(final.max()),
+        )
+
+
 @dataclasses.dataclass
 class Rupture:
     """The fault as it ruptures, from the SRF SW4 ran."""
@@ -537,6 +700,8 @@ class Rupture:
     planes: list[npt.NDArray[np.float64]] = dataclasses.field(default_factory=list)
     """Per SRF plane: the NZTM `(n, 2)` outline of its surface projection, the
     top edge then the bottom edge back."""
+    slip: Slip | None = None
+    """How far the fault has slipped over time, if the SRF has slip rates."""
 
     @property
     def is_point(self) -> bool:
@@ -611,6 +776,7 @@ class Rupture:
         with h5py.File(path, "r") as handle:
             planes = np.atleast_1d(handle.attrs["PLANE"])
             points = handle["POINTS"][:]
+            rates = handle["SR1"][:] if "SR1" in handle else None
         to_nztm = Transformer.from_crs("EPSG:4326", NZTM, always_xy=True)
         segments, outlines = [], []
         offset = 0
@@ -642,7 +808,11 @@ class Rupture:
         hypocentre = np.array(
             to_nztm.transform(points["LON"][first], points["LAT"][first])
         )
-        return cls(segments, hypocentre, float(points["TINIT"].max()), outlines)
+        slip = None
+        if rates is not None:
+            shapes = [(int(plane["NDIP"]), int(plane["NSTK"])) for plane in planes]
+            slip = Slip.from_points(points, rates, shapes)
+        return cls(segments, hypocentre, float(points["TINIT"].max()), outlines, slip)
 
 
 @dataclasses.dataclass

@@ -87,9 +87,12 @@ def sw4_run(tmp_path: Path, geometry: GridGeometry) -> dict[str, Path]:
     lon, lat = np.transpose([_lon_lat(geometry, 22e3, value) for value in y])
     depth = np.array([1.0, 5.0])[:, None] * np.ones((1, y.size))
     tinit = np.abs(y - 17e3)[None, :] / 2800.0 + 0.0 * depth
+    # Slip peaks mid-fault and shallow, in a 1 s pulse.
+    slip = np.array([[2.0], [1.0]]) * (1.5 - np.abs(y - 17e3)[None, :] / 5e3)
     srf = fake_sw4.write_srf(
         tmp_path / "rupture.srf.h5",
         [(np.tile(lon, (2, 1)), np.tile(lat, (2, 1)), depth, tinit)],
+        slip=[(slip, np.ones_like(slip))],
     )
     corners = [
         _lon_lat(geometry, x, y)
