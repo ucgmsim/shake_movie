@@ -1,6 +1,12 @@
 """Tests for naming the earthquake. Services are stubbed: no network."""
 
 import datetime
+import importlib.metadata
+import io
+import json
+import logging
+import urllib.error
+import urllib.request
 
 import numpy as np
 import pytest
@@ -148,3 +154,96 @@ def test_user_agent_identifies_the_tool() -> None:
     """Requests name the tool and its source, as Nominatim's policy asks."""
     assert naming.user_agent().startswith("shake_movie/")
     assert "github.com/ucgmsim/shake_movie" in naming.user_agent()
+
+
+@pytest.mark.parametrize(
+    ("day", "text"),
+    [(14, "14th"), (101, "101st"), (111, "111th"), (112, "112th"), (121, "121st")],
+)
+def test_ordinal_beyond_a_month(day: int, text: str) -> None:
+    """Only 11-13 within each hundred take "th"; 101 and 121 do not."""
+    assert naming.ordinal(day) == text
+
+
+def test_user_agent_gives_the_installed_version() -> None:
+    """The User-Agent carries the installed package's version."""
+    version = importlib.metadata.version("shake-movie")
+    assert naming.user_agent() == (
+        f"shake_movie/{version} (+https://github.com/ucgmsim/shake_movie)"
+    )
+
+
+def test_user_agent_without_package_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running from an uninstalled checkout reports version 0."""
+
+    def missing(name: str) -> str:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    assert naming.user_agent() == (
+        "shake_movie/0 (+https://github.com/ucgmsim/shake_movie)"
+    )
+
+
+class FakeUrlopen:
+    """Stands in for urllib's urlopen, recording each request."""
+
+    def __init__(self, body: bytes = b"{}", error: Exception | None = None) -> None:
+        """Answer every request with `body`, or raise `error` if given."""
+        self.body = body
+        self.error = error
+        self.requests: list[tuple[urllib.request.Request, object]] = []
+
+    def __call__(self, request: urllib.request.Request, timeout: object) -> io.BytesIO:
+        """Record the request and its timeout, then answer or fail."""
+        self.requests.append((request, timeout))
+        if self.error is not None:
+            raise self.error
+        return io.BytesIO(self.body)
+
+
+def test_get_json_identifies_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Requests go to the URL with the tool's User-Agent, JSON Accept and timeout."""
+    fake = FakeUrlopen(json.dumps(NOMINATIM).encode())
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    assert naming._get_json("https://example.org/a?b=1") == NOMINATIM
+    [(request, timeout)] = fake.requests
+    assert request.full_url == "https://example.org/a?b=1"
+    assert request.get_header("User-agent") == naming.user_agent()
+    assert request.get_header("Accept") == "application/json"
+    assert timeout == naming.TIMEOUT
+
+
+def test_geonet_asks_for_geojson(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GeoNet is asked for its versioned GeoJSON and its answer is parsed."""
+    fake = FakeUrlopen(json.dumps(GEONET).encode())
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    event = naming.geonet_event("2026p711868")
+    assert event is not None
+    time, locality = event
+    assert locality == "5 km west of Masterton"
+    assert time == datetime.datetime(
+        2026, 9, 21, 9, 23, 42, 309000, tzinfo=datetime.UTC
+    )
+    [(request, _)] = fake.requests
+    assert request.full_url == naming.GEONET_QUAKE_URL.format("2026p711868")
+    assert request.get_header("Accept") == "application/vnd.geo+json;version=2"
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        FakeUrlopen(error=urllib.error.URLError("no route to host")),
+        FakeUrlopen(error=TimeoutError("timed out")),
+        FakeUrlopen(b"<html>Service Unavailable</html>"),
+    ],
+    ids=["unreachable", "timeout", "not-json"],
+)
+def test_get_json_failures_give_none(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fake: FakeUrlopen
+) -> None:
+    """An unreachable, slow or broken service gives None and a warning."""
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    with caplog.at_level(logging.WARNING, logger=naming.__name__):
+        assert naming._get_json("https://example.org/") is None
+    assert "Could not reach https://example.org/" in caplog.text
