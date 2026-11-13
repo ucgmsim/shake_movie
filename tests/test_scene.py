@@ -1,6 +1,7 @@
 """Tests for preparing the scene."""
 
 import gzip
+import io
 from pathlib import Path
 
 import fake_sw4
@@ -279,3 +280,131 @@ def test_inset_outline_keeps_only_large_islands_on_the_mainland_map() -> None:
     assert len(outline) == 1
     assert outline[0].shape[1] == 2
     assert outline[0][:, 0].min() == pytest.approx(1_500_000)
+
+
+def test_cache_directory_follows_xdg_cache_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$XDG_CACHE_HOME` wins; unset or empty, the cache is under `~/.cache`."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert scene.cache_directory() == tmp_path / "xdg" / "shake_movie"
+    monkeypatch.setenv("XDG_CACHE_HOME", "")
+    assert scene.cache_directory() == tmp_path / "home" / ".cache" / "shake_movie"
+    monkeypatch.delenv("XDG_CACHE_HOME")
+    assert scene.cache_directory() == tmp_path / "home" / ".cache" / "shake_movie"
+
+
+def test_download_coastline_fetches_once_into_the_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coastline is downloaded into a new cache directory, then reused."""
+    cache = tmp_path / "deep" / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    requests = []
+
+    def _urlopen(url: str, timeout: float) -> io.BytesIO:
+        requests.append((url, timeout))
+        return io.BytesIO(b"> ring\n172 -43\n")
+
+    monkeypatch.setattr(scene.urllib.request, "urlopen", _urlopen)
+    path = scene.download_coastline()
+    assert path == cache / "shake_movie" / "NZ.gmt"
+    assert path.read_bytes() == b"> ring\n172 -43\n"
+    assert requests == [(scene.LINZ_COASTLINE_URL, 120)]
+    # Only the finished file is left behind, not the partial download.
+    assert sorted(p.name for p in path.parent.iterdir()) == ["NZ.gmt"]
+
+    # Cached: a second call neither downloads nor rewrites it.
+    assert scene.download_coastline() == path
+    assert len(requests) == 1
+    assert path.read_bytes() == b"> ring\n172 -43\n"
+
+
+def test_download_coastline_reuses_an_existing_cache_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing (but empty) cache directory is fine to download into."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    (tmp_path / "shake_movie").mkdir()
+    monkeypatch.setattr(
+        scene.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(b"x")
+    )
+    assert scene.download_coastline().read_bytes() == b"x"
+
+
+def _identity_pixels(easting: np.ndarray, northing: np.ndarray) -> tuple:
+    """Use metres as pixels, rows running south."""
+    return easting, 59 - northing
+
+
+def test_coverage_ignores_parts_that_are_not_polygons() -> None:
+    """Points and lines mixed in with polygons cover nothing themselves."""
+    mixed = shapely.GeometryCollection(
+        [
+            shapely.box(0, 0, 20, 60),
+            shapely.LineString([(40, 0), (40, 60)]),
+            shapely.Point(50, 30),
+        ]
+    )
+    covered = scene.coverage(mixed, (0, 0, 60, 60), _identity_pixels, (60, 60))
+    assert covered[30, 10] > 0.9
+    np.testing.assert_array_equal(covered[:, 30:], 0.0)
+
+
+def test_line_coverage_ignores_parts_that_are_not_lines() -> None:
+    """Polygons and points mixed in with roads are not drawn."""
+    mixed = shapely.GeometryCollection(
+        [
+            shapely.LineString([(0, 30), (60, 30)]),
+            shapely.box(5, 5, 25, 20),
+            shapely.Point(50, 50),
+        ]
+    )
+    covered = scene.line_coverage(
+        mixed, (0, 0, 60, 60), _identity_pixels, (60, 60), 3.0
+    )
+    assert covered[29, 30] > 0.9
+    np.testing.assert_array_equal(covered[40:55, :], 0.0)
+    np.testing.assert_array_equal(covered[:20, :], 0.0)
+
+
+def _srf_points(slip: list[float], nt1: list[int], tinit: list[float]) -> np.ndarray:
+    """SRF `POINTS` records for a 2 x 2 plane."""
+    dtype = np.dtype(
+        [
+            (name, "<i4" if name == "NT1" else "<f4")
+            for name in ("LON", "LAT", "TINIT", "DT", "SLIP1", "NT1")
+        ]
+    )
+    points = np.zeros(4, dtype=dtype)
+    points["LON"] = [172.0, 172.01, 172.0, 172.01]
+    points["LAT"] = [-43.0, -43.0, -43.01, -43.01]
+    points["TINIT"] = tinit
+    points["DT"] = 0.5
+    points["SLIP1"] = slip
+    points["NT1"] = nt1
+    return points
+
+
+def test_points_without_a_pulse_slip_all_at_once() -> None:
+    """A point with no slip-rate samples, or only zero rates, slips its total
+    the moment it starts."""
+    points = _srf_points([2.0, 3.0, 4.0, 0.0], [0, 2, 2, 0], [1.0, 0.0, 0.0, 0.0])
+    # Point 1 has a 1 s pulse; point 2's two rates are both zero.
+    rates = np.array([1.0, 1.0, 0.0, 0.0], np.float32)
+    history = scene.Slip.from_points(points, rates, [(2, 2)])
+    assert history is not None
+    np.testing.assert_allclose(history.duration, [0.0, 1.0, 0.0, 0.0])
+    np.testing.assert_allclose(history.at(0.5), [0.0, 1.5, 4.0, 0.0], rtol=1e-4)
+    np.testing.assert_allclose(history.at(1.0), [2.0, 3.0, 4.0, 0.0], rtol=1e-4)
+    assert history.peak == pytest.approx(4.0)
+
+
+def test_planes_too_thin_have_no_slip() -> None:
+    """A plane only one point down dip or along strike has no cells to draw."""
+    points = _srf_points([1.0] * 4, [0] * 4, [0.0] * 4)
+    rates = np.zeros(0, np.float32)
+    assert scene.Slip.from_points(points, rates, [(1, 4)]) is None
+    assert scene.Slip.from_points(points, rates, [(4, 1)]) is None
+    assert scene.Slip.from_points(points, rates, [(2, 2)]) is not None
