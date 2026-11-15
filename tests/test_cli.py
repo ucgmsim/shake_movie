@@ -1,6 +1,7 @@
 """Tests for planning a movie from an SW4 run's output directory."""
 
 import logging
+import os
 from pathlib import Path
 
 import fake_sw4
@@ -56,6 +57,25 @@ def test_workers_default_to_physical_cores(
     monkeypatch.setattr(
         psutil.Process, "cpu_affinity", lambda self: list(range(affinity))
     )
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: counts[logical])
+    assert cli._cores() == cores
+
+
+@pytest.mark.parametrize(
+    ("available", "logical", "physical", "cores"),
+    [(192, 192, 96, 96), (8, 8, 8, 8), (None, 2, 1, 1)],
+)
+def test_workers_without_affinity_count_usable_cores(
+    monkeypatch: pytest.MonkeyPatch,
+    available: int | None,
+    logical: int,
+    physical: int,
+    cores: int,
+) -> None:
+    """Without an affinity mask (macOS), the usable CPUs count once per core."""
+    counts = {True: logical, False: physical}
+    monkeypatch.delattr(psutil.Process, "cpu_affinity", raising=False)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: available)
     monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: counts[logical])
     assert cli._cores() == cores
 

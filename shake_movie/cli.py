@@ -27,6 +27,7 @@ upload.
 import dataclasses
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -128,11 +129,18 @@ def _cores() -> int:
     The affinity mask lists logical CPUs, so on a node with hyperthreading a
     Slurm job asking for 16 cores sees 32. Each worker holds its own scene,
     renderer and encoder, so running one per hyperthread doubles the memory
-    for little speed.
+    for little speed. Where psutil has no affinity mask (macOS), the CPUs
+    the process may use stand in for it.
     """
     logical = psutil.cpu_count(logical=True) or 1
     physical = psutil.cpu_count(logical=False) or logical
-    return max(1, len(psutil.Process().cpu_affinity()) * physical // logical)
+    process = psutil.Process()
+    available = (
+        len(process.cpu_affinity())
+        if hasattr(process, "cpu_affinity")
+        else (os.process_cpu_count() or logical)
+    )
+    return max(1, available * physical // logical)
 
 
 def _coastline(given: Path | None, realisation: Realisation) -> Path:
