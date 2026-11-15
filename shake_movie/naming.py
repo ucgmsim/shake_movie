@@ -12,11 +12,11 @@ place falls back to the nearest town in the vendored town list.
 
 import dataclasses
 import datetime
+import http.client
 import importlib.metadata
 import json
 import logging
 import re
-import urllib.error
 import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
@@ -141,7 +141,7 @@ def _get_json(url: str, accept: str = "application/json") -> dict | None:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             return json.load(response)
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+    except (OSError, http.client.HTTPException, ValueError) as error:
         logger.warning("Could not reach %s: %s", url, error)
         return None
 
