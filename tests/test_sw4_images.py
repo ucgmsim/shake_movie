@@ -8,6 +8,8 @@ SW4's own `lat` and `lon` images pin down the georeferencing.
 
 from pathlib import Path
 
+import fake_sw4
+import h5py
 import numpy as np
 import pytest
 from pyproj import Transformer
@@ -108,3 +110,126 @@ def test_grid_without_projection_is_rejected() -> None:
     """A grid with no map projection cannot be placed on a map."""
     with pytest.raises(ValueError, match="proj"):
         sw4_images.GridGeometry.from_grid_command({"x": "1000", "h": "100"})
+
+
+def _write_ramp(directory: Path, cycle: int, time: float) -> Path:
+    """Write a small image whose values are `time + 10 i + j`."""
+    i, j = np.meshgrid(*map(np.arange, (3, 4)), indexing="ij")
+    return fake_sw4.write_image(
+        directory, "surf_mag", "mag", cycle, time, time + 10.0 * i + j, SPACING
+    )
+
+
+def test_read_image_returns_float32_in_sw4_layout(tmp_path: Path) -> None:
+    """Values come back as float32 `(ni, nj)` even from double-precision files."""
+    path = _write_ramp(tmp_path, 1, 0.25)
+    with h5py.File(path, "r+") as handle:
+        patches = handle["patches"][:]
+        del handle["patches"]
+        handle.create_dataset("patches", data=patches.astype(np.float64))
+    image = sw4_images.read_image(path)
+    assert image.time == 0.25
+    assert image.grid_size == SPACING
+    assert image.values.dtype == np.float32
+    assert image.values.shape == (3, 4)
+    assert image.values[2, 1] == pytest.approx(0.25 + 21.0)
+    assert sw4_images.read_image_time(path) == 0.25
+    assert sw4_images.read_image_shape(path) == (3, 4)
+
+
+@pytest.mark.parametrize(("plane", "npatch"), [(0, 1), (2, 3), (1, 2)])
+def test_read_image_rejects_other_planes_and_patches(
+    tmp_path: Path, plane: int, npatch: int
+) -> None:
+    """Only single-patch z-plane images can be read."""
+    path = _write_ramp(tmp_path, 1, 0.0)
+    with h5py.File(path, "r+") as handle:
+        handle["plane"][0] = plane
+        handle["npatch"][0] = npatch
+    with pytest.raises(ValueError, match="is not a single-patch SW4 z-plane image"):
+        sw4_images.read_image(path)
+
+
+def test_find_images_skips_names_that_do_not_parse(tmp_path: Path) -> None:
+    """Files matching the glob but not SW4's naming scheme are ignored."""
+    paths = [_write_ramp(tmp_path, cycle, 0.1 * cycle) for cycle in (20, 3)]
+    (tmp_path / "surf_mag.cycle=last.mag.sw4img.h5").touch()
+    assert sw4_images.find_images(tmp_path, "surf_mag", "mag") == paths[::-1]
+
+
+def test_image_sequence_needs_two_images(tmp_path: Path) -> None:
+    """One image is rejected; two are enough to interpolate between."""
+    first = _write_ramp(tmp_path, 0, 0.0)
+    with pytest.raises(ValueError, match="^An image sequence needs at least two"):
+        sw4_images.ImageSequence([first])
+    second = _write_ramp(tmp_path, 1, 2.0)
+    sequence = sw4_images.ImageSequence([second, first])
+    assert sequence.paths == [first, second]
+    np.testing.assert_allclose(sequence.times, [0.0, 2.0])
+    np.testing.assert_allclose(
+        sequence.at(0.5), sw4_images.read_image(first).values + 0.5
+    )
+
+
+def test_image_sequence_keeps_input_order_for_equal_times(tmp_path: Path) -> None:
+    """Images sharing a time stay in the order they were given."""
+    paths = [_write_ramp(tmp_path, cycle, float(cycle // 10)) for cycle in range(40)]
+    given = paths[::-1]
+    sequence = sw4_images.ImageSequence(given)
+    expected = [
+        path
+        for time in range(4)
+        for path in given
+        if path in paths[10 * time : 10 * time + 10]
+    ]
+    assert sequence.paths == expected
+
+
+def test_image_sequence_clamps_after_the_last_image(tmp_path: Path) -> None:
+    """Times at or past the end give the last image, not an extrapolation."""
+    paths = [_write_ramp(tmp_path, cycle, float(cycle)) for cycle in range(4)]
+    sequence = sw4_images.ImageSequence(paths)
+    last = sw4_images.read_image(paths[-1]).values
+    np.testing.assert_allclose(sequence.at(3.0), last)
+    np.testing.assert_allclose(sequence.at(10.0), last)
+    np.testing.assert_allclose(sequence.at(2.25), last - 0.75)
+
+
+def test_image_sequence_caches_the_two_nearest_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the two images nearest the requested one stay cached."""
+    paths = [_write_ramp(tmp_path, cycle, float(cycle)) for cycle in range(3)]
+    sequence = sw4_images.ImageSequence(paths)
+    reads: list[int] = []
+    read_image = sw4_images.read_image
+
+    def counting_read_image(path: Path) -> sw4_images.SurfaceImage:
+        reads.append(paths.index(path))
+        return read_image(path)
+
+    monkeypatch.setattr(sw4_images, "read_image", counting_read_image)
+    base = read_image(paths[0]).values
+    for time in (0.5, 1.5, 1.75, 0.25):
+        np.testing.assert_allclose(sequence.at(time), base + time, rtol=1e-6)
+    assert reads == [0, 1, 2, 0]
+
+
+def test_parse_sw4_input_skips_comments_and_blank_lines(tmp_path: Path) -> None:
+    """Comments and blank lines are ignored; repeated commands are kept in order."""
+    path = tmp_path / "input.sw4"
+    path.write_text(
+        "# a comment\n"
+        "\n"
+        "   \n"
+        "grid h=100 proj=tmerc  # trailing comment\n"
+        "imagehdf5 mode=mag file='a b'\n"
+        "imagehdf5 mode=hmax expr=x=1\n"
+    )
+    assert sw4_images.parse_sw4_input(path) == {
+        "grid": [{"h": "100", "proj": "tmerc"}],
+        "imagehdf5": [
+            {"mode": "mag", "file": "a b"},
+            {"mode": "hmax", "expr": "x=1"},
+        ],
+    }
