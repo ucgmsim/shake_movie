@@ -1,6 +1,7 @@
 """Tests for naming the earthquake. Services are stubbed: no network."""
 
 import datetime
+import http.client
 import importlib.metadata
 import io
 import json
@@ -236,8 +237,20 @@ def test_geonet_asks_for_geojson(monkeypatch: pytest.MonkeyPatch) -> None:
         FakeUrlopen(error=urllib.error.URLError("no route to host")),
         FakeUrlopen(error=TimeoutError("timed out")),
         FakeUrlopen(b"<html>Service Unavailable</html>"),
+        FakeUrlopen(error=http.client.RemoteDisconnected("closed")),
+        FakeUrlopen(error=http.client.IncompleteRead(b"")),
+        FakeUrlopen(error=ConnectionResetError("reset")),
+        FakeUrlopen(b"\x80not utf-8"),
     ],
-    ids=["unreachable", "timeout", "not-json"],
+    ids=[
+        "unreachable",
+        "timeout",
+        "not-json",
+        "disconnected",
+        "incomplete-read",
+        "reset",
+        "not-utf-8",
+    ],
 )
 def test_get_json_failures_give_none(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, fake: FakeUrlopen
