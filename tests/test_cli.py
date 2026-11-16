@@ -5,16 +5,19 @@ import os
 from pathlib import Path
 
 import fake_sw4
+import h5py
 import numpy as np
 import numpy.typing as npt
 import psutil
 import pytest
+import typer
 from conftest import write_measures
 from matplotlib.axes import Axes
 from matplotlib.text import Text
 
 from shake_movie import cli, palette, render
 from shake_movie.cli import plan_movie
+from shake_movie.realisation import Realisation
 from shake_movie.sw4_images import GridGeometry, ImageSequence, read_image
 
 SETTINGS = render.Settings(width=320, height=180, fps=4)
@@ -262,3 +265,154 @@ def test_default_branding_ships_with_the_package() -> None:
     image = render.load_branding(render.DEFAULT_BRANDING)
     assert image.ndim == 3 and image.shape[2] == 4
     assert 0.0 <= image.min() and image.max() <= 1.0
+
+
+def test_branding_looks_at_the_argument_after_it() -> None:
+    """Whether `--branding` takes a value depends on what follows it, not
+    what comes before it."""
+    assert cli.expand_branding(["logo.png", "--branding", "a.in"]) == [
+        "logo.png",
+        f"--branding={render.DEFAULT_BRANDING}",
+        "a.in",
+    ]
+    assert cli.expand_branding(["a.in", "--branding", "logo.jpeg"]) == [
+        "a.in",
+        "--branding",
+        "logo.jpeg",
+    ]
+
+
+def test_run_expands_the_command_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`shake-movie` hands Typer its arguments, without the program name, with
+    a bare `--branding` expanded."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "app", calls.append)
+    monkeypatch.setattr(
+        "sys.argv", ["shake-movie", "sw4.in", "realisation.json", "--branding"]
+    )
+    cli.run()
+    assert calls == [
+        ["sw4.in", "realisation.json", f"--branding={render.DEFAULT_BRANDING}"]
+    ]
+
+
+def test_image_prefix_picks_the_surface_command() -> None:
+    """Only a mode's `z=0` command names its surface images; commands at depth
+    or without a depth are skipped, and a run with no images has none."""
+    commands = {
+        "imagehdf5": [
+            {"mode": "mag", "file": "no_depth"},
+            {"mode": "mag", "z": "1000", "file": "deep_mag"},
+            {"mode": "hmax", "z": "0", "file": "surf_hmax"},
+            {"mode": "mag", "z": "0", "file": "surf_mag"},
+        ]
+    }
+    assert cli._image_prefix(commands, "mag") == "surf_mag"
+    assert cli._image_prefix(commands, "hmax") == "surf_hmax"
+    assert cli._image_prefix(commands, "topo") is None
+    assert cli._image_prefix({"imagehdf5": commands["imagehdf5"][:2]}, "mag") is None
+    assert cli._image_prefix({}, "mag") is None
+
+
+def test_matching_keeps_images_on_the_terrain_grid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Images on another grid are dropped with a warning counting them; when
+    every image matches, nothing is said."""
+    good = [
+        fake_sw4.write_image(tmp_path, "surf_mag", "mag", c, c, np.ones((3, 4)), 1e3)
+        for c in (1, 2, 3)
+    ]
+    stale = [
+        fake_sw4.write_image(tmp_path, "surf_mag", "mag", c, c, np.ones((7, 5)), 1e3)
+        for c in (4, 5)
+    ]
+    with caplog.at_level(logging.WARNING, logger="shake_movie"):
+        assert cli._matching(good, (3, 4)) == good
+    assert not caplog.records
+    with caplog.at_level(logging.WARNING, logger="shake_movie"):
+        assert cli._matching(good + stale, (3, 4)) == good
+    assert [record.getMessage() for record in caplog.records] == [
+        "Skipping 2 images that don't match the 3 x 4 terrain, left by another SW4 run"
+    ]
+
+
+def test_cores_round_down_to_whole_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A share of a core isn't a worker: the count is a whole number."""
+    counts = {True: 4, False: 2}
+    monkeypatch.setattr(psutil.Process, "cpu_affinity", lambda self: [0, 1, 2])
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: counts[logical])
+    cores = cli._cores()
+    assert cores == 1 and isinstance(cores, int)
+
+
+def test_cores_with_nothing_known_is_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When neither psutil nor the OS can count the CPUs, one worker runs."""
+    monkeypatch.delattr(psutil.Process, "cpu_affinity", raising=False)
+    monkeypatch.setattr(os, "process_cpu_count", lambda: None)
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: None)
+    assert cli._cores() == 1
+
+
+def _realisation(coastline: Path | None) -> Realisation:
+    """A realisation naming the given velocity model coastline."""
+    return Realisation("test_run", 6.0, np.zeros((4, 2)), coastline)
+
+
+@pytest.mark.parametrize("name", [None, "missing.gmt"])
+def test_coastline_downloads_linz_without_the_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str | None
+) -> None:
+    """Without a velocity model coastline on disk, LINZ's is downloaded."""
+    linz = tmp_path / "linz.gpkg"
+    monkeypatch.setattr(cli.scene, "download_coastline", lambda: linz)
+    model = None if name is None else tmp_path / name
+    assert cli._coastline(None, _realisation(model)) == linz
+
+
+def test_coastline_prefers_given_then_the_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A given coastline wins, then the velocity model's, and nothing is
+    downloaded."""
+
+    def _no_download() -> Path:
+        """Fail: the test has a coastline to hand."""
+        raise AssertionError("downloaded LINZ's coastline")
+
+    monkeypatch.setattr(cli.scene, "download_coastline", _no_download)
+    model = tmp_path / "model.gmt"
+    model.write_text("")
+    given = tmp_path / "given.gmt"
+    assert cli._coastline(given, _realisation(model)) == given
+    assert cli._coastline(None, _realisation(model)) == model
+
+
+def test_plan_needs_velocity_images(sw4_run: dict[str, Path], tmp_path: Path) -> None:
+    """A run without its surface images can't make a movie."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(typer.BadParameter, match="surface `topo` image"):
+        plan_movie(
+            sw4_run["sw4_input"],
+            sw4_run["realisation"],
+            SETTINGS,
+            empty,
+            None,
+            sw4_run["coastline"],
+            online=False,
+        )
+
+
+def test_still_run_keeps_a_usable_scale(sw4_run: dict[str, Path]) -> None:
+    """A run where the ground never moves still plans a movie, scaled to
+    1 m/s and 1 cm/s rather than to zero."""
+    for mode in ("mag", "hmax"):
+        for path in sw4_run["images"].glob(f"surf_{mode}.*"):
+            with h5py.File(path, "r+") as handle:
+                handle["patches"][...] = 0.0
+    plan = _plan(sw4_run)
+    assert plan.reference == 1.0
+    assert plan.end_card.scale.high == 1.0
+    land = plan.scene.wave_opacity >= 1.0
+    np.testing.assert_array_equal(plan.end_card.pgv[land], 0.0)
