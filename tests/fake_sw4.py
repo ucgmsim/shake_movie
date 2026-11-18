@@ -2,13 +2,18 @@
 
 The image layout copies SW4's `Image::writeImagePlane_2` (checked against the
 real SW4 output in `tests/data/sw4_images`): one patch of `ni * nj` values in
-Fortran order, with its metadata stored as one-element datasets.
+Fortran order, with its metadata stored as one-element datasets. SW4's
+compressed layout keeps the metadata but replaces `patches` with one chunked
+2-D dataset per patch, `patch0`, of HDF5 shape `(nj, ni)` in C order (the same
+values in the same order), compressed with ZFP.
 """
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import h5py
+import hdf5plugin
 import numpy as np
 import numpy.typing as npt
 
@@ -24,6 +29,8 @@ def write_image(
     time: float,
     values: npt.NDArray[np.floating],
     spacing: float,
+    compression: Mapping[str, object] | None = None,
+    dtype: npt.DTypeLike = np.float32,
 ) -> Path:
     """Write one SW4 z = 0 image.
 
@@ -43,6 +50,11 @@ def write_image(
         Image values, `(ni, nj)`.
     spacing : float
         Grid spacing (m).
+    compression : Mapping[str, object] | None
+        An hdf5plugin filter (e.g. `hdf5plugin.Zfp(accuracy=1e-6)`) to write
+        SW4's compressed layout with; None writes the original `patches`.
+    dtype : np.dtype
+        The values' precision in the file.
 
     Returns
     -------
@@ -68,10 +80,53 @@ def write_image(
             "zmin": -spacing,
         }.items():
             handle.create_dataset(name, data=np.array([value], dtype=np.float64))
-        handle.create_dataset(
-            "patches", data=np.asarray(values, dtype=np.float32).ravel(order="F")
-        )
+        values = np.asarray(values, dtype=dtype)
+        if compression is None:
+            handle.create_dataset("patches", data=values.ravel(order="F"))
+        else:
+            handle.create_dataset(
+                "patch0", data=np.ascontiguousarray(values.T), **compression
+            )
     return path
+
+
+def compress_image(
+    source: Path,
+    destination: Path,
+    compression: Mapping[str, object] | None = None,
+) -> Path:
+    """Rewrite an SW4 image in SW4's compressed layout, as SW4 would write it.
+
+    The header datasets are copied as they are, and `patches` becomes
+    `patch0`, its values reshaped to `(nj, ni)` in C order.
+
+    Parameters
+    ----------
+    source : Path
+        An image in the original layout.
+    destination : Path
+        The image to write.
+    compression : Mapping[str, object] | None
+        The hdf5plugin filter; lossless ZFP if None.
+
+    Returns
+    -------
+    Path
+        The written file.
+    """
+    compression = (
+        hdf5plugin.Zfp(reversible=True) if compression is None else compression
+    )
+    with h5py.File(source, "r") as old, h5py.File(destination, "w") as new:
+        for name, dataset in old.items():
+            if name != "patches":
+                new.create_dataset(name, data=dataset[...])
+        ni, nj = int(old["ni"][0]), int(old["nj"][0])
+        patches = old["patches"][...]
+        new.create_dataset(
+            "patch0", data=patches.reshape((nj, ni)), chunks=True, **compression
+        )
+    return destination
 
 
 def write_srf(

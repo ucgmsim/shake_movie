@@ -1257,6 +1257,9 @@ class Job:
     """How to render."""
     output: Path
     """Where to write this segment."""
+    velocity_times: list[float] | None = None
+    """Simulation time of each `velocity` image (s), so the worker need not
+    open every image to read it; read from the images if None."""
 
 
 def waves(
@@ -1563,7 +1566,7 @@ def render_segment(job: Job) -> Path:
     os.environ.setdefault("LP_NUM_THREADS", "1")
     scene, settings = job.scene, job.settings
     ex = settings.exaggeration
-    sequence = ImageSequence(job.velocity)
+    sequence = ImageSequence(job.velocity, job.velocity_times)
     renderer = Renderer(scene, settings)
     placer = LabelPlacer(scene, settings)
     encoder = subprocess.Popen(
@@ -1666,6 +1669,7 @@ def render_movie(
     settings: Settings,
     output: Path,
     workers: int,
+    velocity_times: list[float] | None = None,
 ) -> None:
     """Render every frame across worker processes and write the movie.
 
@@ -1688,6 +1692,8 @@ def render_movie(
         The MP4 to write.
     workers : int
         Worker processes.
+    velocity_times : list[float] | None
+        Simulation time of each `velocity` image (s), if already read.
 
     Raises
     ------
@@ -1710,6 +1716,7 @@ def render_movie(
                 end_card,
                 settings,
                 Path(directory) / f"segment{k:03d}.mp4",
+                velocity_times,
             )
             for k, (a, b) in enumerate(itertools.pairwise(bounds))
         ]

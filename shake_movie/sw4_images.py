@@ -12,16 +12,26 @@ where `(x0, y0)` is the grid origin projected with the PROJ string SW4
 assembles from the `grid` command. That string is rebuilt here exactly as SW4
 builds it, so the movie lands where SW4 put the simulation (including SW4
 passing `scale=` through as `+scale`, which PROJ ignores for `tmerc`).
+
+SW4 writes images in two layouts, read alike. The original holds every patch
+in one 1-D `patches` dataset. The compressed layout holds no `patches`, but
+one chunked 2-D dataset per patch (`patch0`, `patch1`, ...) of HDF5 shape
+`(nj, ni)` in C order, whose C-order flattening is what that patch takes up in
+`patches`, compressed with the H5Z-ZFP filter. Importing `hdf5plugin`
+registers that filter with HDF5.
 """
 
 import dataclasses
 import functools
+import itertools
 import shlex
 from collections.abc import Sequence
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Self
 
 import h5py
+import hdf5plugin  # noqa: F401  (registers the ZFP filter SW4 compresses with)
 import numpy as np
 import numpy.typing as npt
 import parse
@@ -37,6 +47,10 @@ IMAGE_NAME = parse.compile("{prefix}.cycle={cycle:d}.z={coordinate}.{mode}.sw4im
 """SW4's image file name (`Image::compute_file_suffix`). The cycle's zero
 padding depends on the number of time steps, so files are matched by pattern."""
 
+MAXIMUM_IMAGES_PER_WORKER = 20
+"""Fewest images worth starting a worker process for when taking the maximum
+over a sequence."""
+
 GRID_PROJECTION_PARAMETERS = {
     "proj": ("+proj=", False),
     "ellps": (" +ellps=", False),
@@ -48,6 +62,11 @@ GRID_PROJECTION_PARAMETERS = {
 """How SW4's `grid` command parameters become its PROJ string, in SW4's order,
 with whether SW4 reads the value as a number. Numbers are written with `:g`,
 which matches the six significant digits C++ streams give `atof`'s result."""
+
+
+FILTER_NAMES = {32013: "H5Z-ZFP"}
+"""Names of the HDF5 filters SW4 compresses images with, by filter id, for
+error messages."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -79,18 +98,47 @@ def read_image(path: Path) -> SurfaceImage:
     ------
     ValueError
         If the file is not a single-patch z-plane image.
+    OSError
+        If the image is compressed with a filter HDF5 does not have.
     """
     with h5py.File(path, "r") as handle:
         if int(handle["plane"][0]) != 2 or int(handle["npatch"][0]) != 1:
             raise ValueError(f"{path} is not a single-patch SW4 z-plane image.")
         ni = int(handle["ni"][0])
         nj = int(handle["nj"][0])
-        values = np.asarray(handle["patches"][:], dtype=np.float32)
+        if "patches" in handle:
+            values = np.asarray(handle["patches"][:], dtype=np.float32)
+            values = values.reshape((ni, nj), order="F")
+        elif "patch0" in handle:
+            patch = handle["patch0"]
+            if patch.shape != (nj, ni):
+                raise ValueError(
+                    f"{path}'s patch0 is {patch.shape}, not (nj, ni) = ({nj}, {ni})."
+                )
+            _check_filters(patch, path)
+            # C order (nj, ni) is Fortran order (ni, nj).
+            values = np.asarray(patch[...], dtype=np.float32).T
+        else:
+            raise ValueError(f"{path} has neither `patches` nor `patch0`.")
         return SurfaceImage(
             time=float(handle["time"][0]),
-            values=values.reshape((ni, nj), order="F"),
+            values=values,
             grid_size=float(handle["grid_size"][0]),
         )
+
+
+def _check_filters(dataset: h5py.Dataset, path: Path) -> None:
+    """Raise a clear error if HDF5 lacks a filter the dataset needs."""
+    plist = dataset.id.get_create_plist()
+    for k in range(plist.get_nfilters()):
+        code = plist.get_filter(k)[0]
+        if not h5py.h5z.filter_avail(code):
+            name = FILTER_NAMES.get(code, f"HDF5 filter {code}")
+            raise OSError(
+                f"{path} is compressed with {name} (filter id {code}), which this"
+                " HDF5 cannot decompress. Install hdf5plugin with that filter, or"
+                " set HDF5_PLUGIN_PATH to a directory holding it."
+            )
 
 
 def read_image_time(path: Path) -> float:
@@ -159,21 +207,30 @@ class ImageSequence:
     ----------
     paths : Sequence[Path]
         Image files from a single `imagehdf5` command.
+    times : Sequence[float] | None
+        Each image's simulation time (s), if already known (as `times` of
+        another sequence over the same images); read from the files if not.
 
     Raises
     ------
     ValueError
-        If fewer than two images are given.
+        If fewer than two images are given, or not one time per image.
     """
 
-    def __init__(self, paths: Sequence[Path]) -> None:
+    def __init__(
+        self, paths: Sequence[Path], times: Sequence[float] | None = None
+    ) -> None:
         """Index a sequence of images by their simulation times."""
         if len(paths) < 2:
             raise ValueError("An image sequence needs at least two images.")
-        times = np.array([read_image_time(path) for path in paths])
-        order = np.argsort(times, kind="stable")
-        self.paths = [paths[i] for i in order]
-        self.times = times[order]
+        if times is None:
+            times = [read_image_time(path) for path in paths]
+        elif len(times) != len(paths):
+            raise ValueError("An image sequence needs one time per image.")
+        known = np.asarray(times, dtype=np.float64)
+        order = np.argsort(known, kind="stable")
+        self.paths = [paths[i] for i in order.tolist()]
+        self.times = known[order]
         self._cache: dict[int, npt.NDArray[np.float32]] = {}
 
     def _values(self, index: int) -> npt.NDArray[np.float32]:
@@ -218,18 +275,41 @@ class ImageSequence:
         after = self._values(index + 1)
         return before + np.float32(weight) * (after - before)
 
-    def maximum(self) -> npt.NDArray[np.float32]:
+    def maximum(self, workers: int = 1) -> npt.NDArray[np.float32]:
         """Take the pointwise maximum over every image.
+
+        This reads, and decompresses, every image, so with many images it is
+        split across worker processes.
+
+        Parameters
+        ----------
+        workers : int
+            Worker processes to read the images in; 1 reads them here.
 
         Returns
         -------
         np.ndarray
             The maximum image, shape `(ni, nj)`.
         """
-        peak = read_image(self.paths[0]).values.copy()
-        for path in self.paths[1:]:
-            np.maximum(peak, read_image(path).values, out=peak)
+        workers = max(1, min(workers, len(self.paths) // MAXIMUM_IMAGES_PER_WORKER))
+        if workers == 1:
+            return _maximum(self.paths)
+        bounds = np.linspace(0, len(self.paths), workers + 1).round().astype(int)
+        parts = [self.paths[a:b] for a, b in itertools.pairwise(bounds.tolist())]
+        with get_context("spawn").Pool(workers) as pool:
+            peaks = pool.imap_unordered(_maximum, parts)
+            peak = next(peaks)
+            for other in peaks:
+                np.maximum(peak, other, out=peak)
         return peak
+
+
+def _maximum(paths: Sequence[Path]) -> npt.NDArray[np.float32]:
+    """Take the pointwise maximum over images, read one at a time."""
+    peak = read_image(paths[0]).values.copy()
+    for path in paths[1:]:
+        np.maximum(peak, read_image(path).values, out=peak)
+    return peak
 
 
 def parse_sw4_input(path: Path) -> dict[str, list[dict[str, str]]]:

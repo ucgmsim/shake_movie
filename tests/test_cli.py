@@ -15,7 +15,7 @@ from conftest import write_measures
 from matplotlib.axes import Axes
 from matplotlib.text import Text
 
-from shake_movie import cli, palette, render
+from shake_movie import cli, palette, render, sw4_images
 from shake_movie.cli import plan_movie
 from shake_movie.realisation import Realisation
 from shake_movie.sw4_images import GridGeometry, ImageSequence, read_image
@@ -117,6 +117,38 @@ def test_waves_are_relative_to_the_strongest(sw4_run: dict[str, Path]) -> None:
     stride = plan.scene.wave_stride
     moving = ImageSequence(plan.velocity).maximum()[::stride, ::stride]
     assert plan.reference == pytest.approx(float(moving[plan.scene.wave_inside].max()))
+
+
+def test_compressed_run_plans_as_uncompressed(
+    sw4_run: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run whose images SW4 wrote compressed (lossless ZFP here) plans the
+    same movie as the same run uncompressed, with its peak taken in workers."""
+    plain = _plan(sw4_run)
+    monkeypatch.setattr(sw4_images, "MAXIMUM_IMAGES_PER_WORKER", 1)
+    for path in sorted(sw4_run["images"].glob("*.sw4img.h5")):
+        fake_sw4.compress_image(path, tmp_path / path.name)
+        (tmp_path / path.name).replace(path)
+    compressed = plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        SETTINGS,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+        workers=2,
+    )
+    with h5py.File(compressed.velocity[0], "r") as handle:
+        assert "patches" not in handle
+    assert compressed.velocity == plain.velocity
+    assert compressed.velocity_times == plain.velocity_times
+    assert compressed.reference == plain.reference
+    assert compressed.frames == plain.frames
+    np.testing.assert_array_equal(compressed.end_card.pgv, plain.end_card.pgv)
+    np.testing.assert_array_equal(
+        compressed.scene.mesh_elevation, plain.scene.mesh_elevation
+    )
 
 
 def test_waves_reach_the_broadband_peak(

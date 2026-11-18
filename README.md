@@ -20,13 +20,16 @@ says where the rest is:
 | File | From | Used for |
 |---|---|---|
 | `topo` image (z = 0, cycle 0) | SW4 `imagehdf5 mode=topo` | Terrain mesh and hillshade |
-| `surf_mag` images (z = 0, every 0.5 s) | SW4 `imagehdf5 mode=mag` | Shaking, interpolated in time to the frame rate |
+| `surf_mag` images (z = 0, e.g. every 0.5 s) | SW4 `imagehdf5 mode=mag` | Shaking, interpolated in time to the frame rate |
 | `surf_hmax` image (z = 0, end) | SW4 `imagehdf5 mode=hmax` | Strongest shaking map, without intensity measures |
 | SRF (`rupturehdf5`) | the SRF SW4 ran | Fault trace, rupture timing, slip, epicentre |
 | Realisation JSON | the workflow | Magnitude, simulated domain, coastline |
 | `intensity_measures.h5` (`--intensity-measures`) | the workflow's `im-calc` | Strongest shaking map (broadband PGV) |
 
-The workflow's defaults already write these images. SW4 driven by an SRF slip
+The workflow's defaults already write these images. They may be in SW4's
+original layout (one `patches` dataset) or its ZFP-compressed one (a
+`patch0` dataset per image, read through `hdf5plugin`), and at any image
+interval: more frequent images only cost more reading. SW4 driven by an SRF slip
 rate outputs velocity where its modes say displacement, so `mag` is ground
 velocity and `hmax` peak horizontal ground velocity. Velocity becomes
 intensity through Worden et al. (2012).

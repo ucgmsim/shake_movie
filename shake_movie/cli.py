@@ -4,7 +4,7 @@ Run it as `shake-movie SW4_INPUT REALISATION [--intensity-measures
 intensity_measures.h5] [--output MOVIE.mp4]`.
 Everything else is read from the SW4 input file: where SW4 wrote its images
 (`fileio`), which `imagehdf5` commands hold the terrain (`topo`), the ground
-velocity (`mag`, every 0.5 s in the workflow's defaults) and its peak
+velocity (`mag`, at any interval; 0.5 s in the workflow's defaults) and its peak
 (`hmax`), and the SRF it ran (`rupturehdf5`). SW4 driven by an SRF slip
 *rate* outputs velocity where its modes say displacement, so `mag` is ground
 velocity and `hmax` peak horizontal ground velocity.
@@ -255,7 +255,9 @@ class MoviePlan:
     frames: list[camera.Frame]
     """Every frame of the movie."""
     velocity: list[Path]
-    """`surf_mag` images (ground velocity)."""
+    """`surf_mag` images (ground velocity), in time order."""
+    velocity_times: list[float]
+    """Simulation time of each `velocity` image (s)."""
     reference: float
     """The strongest low-frequency ground velocity (m/s), which the waves are
     scaled to the top of the colour scale by."""
@@ -293,6 +295,7 @@ def plan_movie(
     coastline: Path | None = None,
     online: bool = True,
     measures: Path | None = None,
+    workers: int = 1,
 ) -> MoviePlan:
     """Read an SW4 run and work out the movie: scene, names and camera.
 
@@ -314,6 +317,8 @@ def plan_movie(
         Whether to ask GeoNet and Nominatim for the date and place.
     measures : Path | None
         The workflow's broadband `intensity_measures.h5`, for the final map.
+    workers : int
+        Worker processes to read the `mag` images in, for their peak.
 
     Returns
     -------
@@ -362,7 +367,7 @@ def plan_movie(
     logger.info("Planning the camera")
     sequence = ImageSequence(velocity)
     stride = shake_scene.wave_stride
-    moving = sequence.maximum()
+    moving = sequence.maximum(workers)
     inside = moving[::stride, ::stride][shake_scene.wave_inside]
     reference = float(inside.max()) if inside.size else float(moving.max())
     if not reference > 0:
@@ -394,7 +399,16 @@ def plan_movie(
     )
     strongest = read_image(peak[-1]).values if peak else moving
     card = end_card(shake_scene, geometry, terrain.grid_size, strongest, measures)
-    return MoviePlan(info, name, shake_scene, frames, velocity, reference, card)
+    return MoviePlan(
+        info,
+        name,
+        shake_scene,
+        frames,
+        sequence.paths,
+        sequence.times.tolist(),
+        reference,
+        card,
+    )
 
 
 @app.command()
@@ -492,6 +506,7 @@ def main(
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     settings = render.Settings(width=width, height=height, fps=fps, branding=branding)
+    count = workers or _cores()
     plan = plan_movie(
         sw4_input,
         realisation,
@@ -501,9 +516,9 @@ def main(
         coastline,
         online=not offline,
         measures=measures,
+        workers=count,
     )
     output = output or Path(f"{plan.realisation.name}.mp4")
-    count = workers or _cores()
     logger.info("Rendering %d frames on %d workers", len(plan.frames), count)
     render.render_movie(
         plan.scene,
@@ -514,6 +529,7 @@ def main(
         settings,
         output,
         count,
+        velocity_times=plan.velocity_times,
     )
     output.with_suffix(".json").write_text(json.dumps(plan.metadata(), indent=2))
     logger.info("Wrote %s", output)
