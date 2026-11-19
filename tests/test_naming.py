@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import numpy as np
@@ -260,3 +261,114 @@ def test_get_json_failures_give_none(
     with caplog.at_level(logging.WARNING, logger=naming.__name__):
         assert naming._get_json("https://example.org/") is None
     assert "Could not reach https://example.org/" in caplog.text
+
+
+def test_get_json_warning_names_the_url_and_the_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning says exactly which URL failed and why."""
+    fake = FakeUrlopen(error=ConnectionResetError("connection reset by peer"))
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+    with caplog.at_level(logging.WARNING, logger=naming.__name__):
+        assert naming._get_json("https://example.org/") is None
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert record.getMessage() == (
+        "Could not reach https://example.org/: connection reset by peer"
+    )
+
+
+def test_geonet_event_without_a_locality(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An event GeoNet has not yet placed gives an empty locality, not None."""
+    feature = {"properties": {"time": "2026-09-21T09:23:42Z"}}
+    monkeypatch.setattr(
+        naming, "_get_json", lambda url, accept="": {"features": [feature]}
+    )
+    event = naming.geonet_event("2026p711868")
+    assert event is not None
+    time, locality = event
+    assert locality == ""
+    assert time.tzinfo == naming.NZ_TIME
+    assert time == datetime.datetime(2026, 9, 21, 9, 23, 42, tzinfo=datetime.UTC)
+
+
+@pytest.mark.parametrize(
+    "document", [None, {}, {"features": []}, {"features": None}], ids=str
+)
+def test_geonet_event_without_features(
+    monkeypatch: pytest.MonkeyPatch, document: dict | None
+) -> None:
+    """No answer, or an answer with no event, gives None."""
+    monkeypatch.setattr(naming, "_get_json", lambda url, accept="": document)
+    assert naming.geonet_event("2026p711868") is None
+
+
+def test_reverse_geocode_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nominatim is asked for JSON v2 at district zoom, in English, at the point."""
+    calls = []
+
+    def fake(url: str, accept: str = "application/json") -> dict:
+        calls.append(url)
+        return NOMINATIM
+
+    monkeypatch.setattr(naming, "_get_json", fake)
+    assert (
+        naming.reverse_geocode(172.6362254, -42.5263711)
+        == "Hurunui District, Canterbury"
+    )
+    [url] = calls
+    base, _, query = url.partition("?")
+    assert base == naming.NOMINATIM_URL
+    assert urllib.parse.parse_qs(query, strict_parsing=True) == {
+        "format": ["jsonv2"],
+        "lat": ["-42.52637"],
+        "lon": ["172.63623"],
+        "zoom": ["10"],
+        "accept-language": ["en"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("document", "text"),
+    [
+        (
+            {"address": {"town": "Hanmer Springs", "county": "Hurunui District"}},
+            "Hanmer Springs, Hurunui District",
+        ),
+        (
+            {
+                "address": {
+                    "city": "Christchurch",
+                    "county": "Christchurch City",
+                    "state": "Canterbury",
+                }
+            },
+            "Christchurch, Christchurch City",
+        ),
+        (
+            {"address": {"city": "Auckland", "state": "Auckland"}},
+            "Auckland",
+        ),
+        ({"address": {"state": "Canterbury"}}, "Canterbury"),
+        ({"address": {"country": "New Zealand"}}, None),
+        ({"address": {}}, None),
+        ({"error": "Unable to geocode"}, None),
+        (None, None),
+    ],
+    ids=[
+        "town-district",
+        "first-two",
+        "deduplicated",
+        "region-only",
+        "country-only",
+        "empty-address",
+        "at-sea",
+        "unreachable",
+    ],
+)
+def test_reverse_geocode_wording(
+    monkeypatch: pytest.MonkeyPatch, document: dict | None, text: str | None
+) -> None:
+    """The two most local names are joined once each; nothing local gives None."""
+    monkeypatch.setattr(naming, "_get_json", lambda url, accept="": document)
+    assert naming.reverse_geocode(172.6, -42.5) == text
