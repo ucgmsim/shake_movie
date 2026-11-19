@@ -139,8 +139,12 @@ def test_pgv_to_mmi_break_belongs_to_the_lower_branch() -> None:
     pgv = np.float32(3.388441324234009)
     assert np.log10(pgv) == np.float32(0.53)
     assert palette.pgv_to_mmi(pgv) == pytest.approx(3.78 + 1.47 * 0.53, abs=1e-4)
-    # Just above the break the upper relation takes over.
-    above = np.nextafter(pgv, np.float32(10.0))
+    # Just above the break the upper relation takes over. One float32 step in
+    # PGV moves log10 by less than half a float32 step at 0.53, so step until
+    # the single-precision log10 actually clears the break.
+    above = pgv
+    while np.log10(above) <= np.float32(0.53):
+        above = np.nextafter(above, np.float32(10.0))
     assert palette.pgv_to_mmi(above) == pytest.approx(2.89 + 3.16 * 0.53, abs=1e-4)
 
 
