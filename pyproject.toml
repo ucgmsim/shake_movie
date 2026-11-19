@@ -13,6 +13,7 @@ authors = [{ name = "ucgmsim" }]
 requires-python = ">=3.13"
 dependencies = [
   "h5py>=3.12",
+  "hdf5plugin>=5",
   "matplotlib>=3.10",
   "numpy>=2",
   "parse>=1.20",

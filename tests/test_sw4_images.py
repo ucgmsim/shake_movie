@@ -10,6 +10,7 @@ from pathlib import Path
 
 import fake_sw4
 import h5py
+import hdf5plugin
 import numpy as np
 import pytest
 from pyproj import Transformer
@@ -233,3 +234,182 @@ def test_parse_sw4_input_skips_comments_and_blank_lines(tmp_path: Path) -> None:
             {"mode": "hmax", "expr": "x=1"},
         ],
     }
+
+
+# SW4's compressed layout: `patch0` of HDF5 shape (nj, ni) in C order, ZFP.
+
+
+def _write_grid(
+    directory: Path,
+    cycle: int,
+    time: float,
+    shape: tuple[int, int] = (37, 23),
+    compression: hdf5plugin.Zfp | None = None,
+    dtype: type = np.float32,
+) -> Path:
+    """Write a non-square image whose values are `time + 100 i + j`."""
+    i, j = np.meshgrid(*map(np.arange, shape), indexing="ij")
+    return fake_sw4.write_image(
+        directory,
+        "surf_mag",
+        "mag",
+        cycle,
+        time,
+        time + 100.0 * i + j,
+        SPACING,
+        compression,
+        dtype,
+    )
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+@pytest.mark.parametrize(
+    ("compression", "tolerance"),
+    [
+        (hdf5plugin.Zfp(reversible=True), 0.0),
+        (hdf5plugin.Zfp(accuracy=1e-3), 1e-3),
+        (hdf5plugin.Zfp(rate=16), 1.0),
+    ],
+)
+def test_compressed_image_reads_in_sw4_layout(
+    tmp_path: Path, dtype: type, compression: hdf5plugin.Zfp, tolerance: float
+) -> None:
+    """A ZFP `patch0` of shape (nj, ni) comes back as `(ni, nj)` float32,
+    oriented as the uncompressed `patches` are, to within ZFP's error."""
+    (tmp_path / "plain").mkdir()
+    plain = _write_grid(tmp_path / "plain", 1, 0.5)
+    path = _write_grid(tmp_path, 1, 0.5, compression=compression, dtype=dtype)
+    with h5py.File(path, "r") as handle:
+        assert "patches" not in handle
+        assert handle["patch0"].shape == (23, 37)
+        assert handle["patch0"].chunks is not None
+        assert handle["patch0"].id.get_create_plist().get_filter(0)[0] == 32013
+    image = sw4_images.read_image(path)
+    expected = sw4_images.read_image(plain)
+    assert image.values.dtype == np.float32
+    assert image.values.shape == (37, 23)
+    assert image.time == 0.5
+    assert image.grid_size == SPACING
+    assert image.values[30, 4] == pytest.approx(3004.5, abs=tolerance)
+    np.testing.assert_allclose(image.values, expected.values, rtol=0, atol=tolerance)
+    assert sw4_images.read_image_time(path) == 0.5
+    assert sw4_images.read_image_shape(path) == (37, 23)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "topo.cycle=00.z=0.topo.sw4img.h5",
+        "surf_mag.cycle=04.z=0.mag.sw4img.h5",
+        "surf_hmax.cycle=16.z=0.hmax.sw4img.h5",
+        "lat.cycle=00.z=0.lat.sw4img.h5",
+    ],
+)
+def test_sw4_images_read_identically_once_compressed(tmp_path: Path, name: str) -> None:
+    """SW4's own images, rewritten losslessly in the compressed layout (patches
+    reshaped to (nj, ni) in C order), read exactly as the originals."""
+    original = sw4_images.read_image(DATA / name)
+    compressed = sw4_images.read_image(
+        fake_sw4.compress_image(DATA / name, tmp_path / name)
+    )
+    assert compressed.time == original.time
+    assert compressed.grid_size == original.grid_size
+    np.testing.assert_array_equal(compressed.values, original.values)
+
+
+def test_compressed_topography_keeps_sw4_orientation(tmp_path: Path) -> None:
+    """The hill stays at (i, j) = (14, 33) on the non-square 41 x 51 grid."""
+    name = "topo.cycle=00.z=0.topo.sw4img.h5"
+    path = fake_sw4.compress_image(
+        DATA / name, tmp_path / name, hdf5plugin.Zfp(accuracy=0.1)
+    )
+    topo = sw4_images.read_image(path)
+    assert topo.values.shape == (41, 51)
+    i, j = np.unravel_index(np.argmax(topo.values), topo.values.shape)
+    assert (i, j) == (14, 33)
+    assert topo.values[i, j] == pytest.approx(1000.0, rel=1e-3)
+
+
+def test_unavailable_filter_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the ZFP filter, the error says so instead of HDF5's own."""
+    path = _write_grid(tmp_path, 1, 0.0, compression=hdf5plugin.Zfp(accuracy=1e-3))
+    monkeypatch.setattr(h5py.h5z, "filter_avail", lambda code: code != 32013)
+    with pytest.raises(OSError, match=r"compressed with H5Z-ZFP \(filter id 32013\)"):
+        sw4_images.read_image(path)
+    assert sw4_images.read_image_time(path) == 0.0
+
+
+def test_image_without_values_is_rejected(tmp_path: Path) -> None:
+    """A file with neither layout's values, or a mis-shaped patch, is refused."""
+    path = _write_grid(tmp_path, 1, 0.0, shape=(3, 4))
+    with h5py.File(path, "r+") as handle:
+        del handle["patches"]
+    with pytest.raises(ValueError, match="neither `patches` nor `patch0`"):
+        sw4_images.read_image(path)
+    with h5py.File(path, "r+") as handle:
+        handle.create_dataset("patch0", data=np.zeros((3, 4), np.float32))
+    with pytest.raises(ValueError, match=r"patch0 is \(3, 4\), not \(nj, ni\)"):
+        sw4_images.read_image(path)
+
+
+def test_image_sequence_over_compressed_images(tmp_path: Path) -> None:
+    """Sequences interpolate and take the peak of compressed images as of
+    uncompressed ones, and mixed layouts in one sequence read alike."""
+    zfp = hdf5plugin.Zfp(reversible=True)
+    paths = [
+        _write_grid(
+            tmp_path, cycle, 0.1 * cycle, compression=zfp if cycle % 2 else None
+        )
+        for cycle in range(6)
+    ]
+    sequence = sw4_images.ImageSequence(paths)
+    base = sw4_images.read_image(paths[0]).values
+    np.testing.assert_allclose(sequence.at(0.25), base + 0.25, rtol=1e-6)
+    np.testing.assert_allclose(sequence.maximum(), base + 0.5, rtol=1e-6)
+
+
+def test_image_sequence_takes_known_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given the times, a sequence opens no image until it needs its values."""
+    paths = [_write_ramp(tmp_path, cycle, float(cycle)) for cycle in range(3)]
+    times = sw4_images.ImageSequence(paths).times.tolist()
+
+    def no_time(path: Path) -> float:
+        raise AssertionError(f"{path} was opened for its time")
+
+    monkeypatch.setattr(sw4_images, "read_image_time", no_time)
+    sequence = sw4_images.ImageSequence(paths[::-1], times[::-1])
+    assert sequence.paths == paths
+    np.testing.assert_allclose(sequence.times, times)
+    with pytest.raises(ValueError, match="one time per image"):
+        sw4_images.ImageSequence(paths, times[:2])
+
+
+def test_image_sequence_maximum_in_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The peak over many images, split across worker processes, matches the
+    peak read in this process."""
+    rng = np.random.default_rng(1)
+    paths = [
+        fake_sw4.write_image(
+            tmp_path,
+            "surf_mag",
+            "mag",
+            cycle,
+            0.1 * cycle,
+            rng.random((9, 7)),
+            SPACING,
+            hdf5plugin.Zfp(reversible=True),
+        )
+        for cycle in range(7)
+    ]
+    sequence = sw4_images.ImageSequence(paths)
+    serial = sequence.maximum()
+    monkeypatch.setattr(sw4_images, "MAXIMUM_IMAGES_PER_WORKER", 2)
+    np.testing.assert_array_equal(sequence.maximum(workers=3), serial)
+    expected = np.max([sw4_images.read_image(path).values for path in paths], axis=0)
+    np.testing.assert_array_equal(serial, expected)

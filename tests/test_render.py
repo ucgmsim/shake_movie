@@ -160,6 +160,7 @@ def test_segment_renders_in_process(sw4_run: dict[str, Path], tmp_path: Path) ->
         plan.end_card,
         settings,
         tmp_path / "segment.mp4",
+        plan.velocity_times,
     )
     assert render.render_segment(job).stat().st_size > 0
     assert plan.metadata()["title"] == "Mw 6.0 earthquake"
