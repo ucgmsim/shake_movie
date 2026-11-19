@@ -116,3 +116,54 @@ def test_shaking_rgba_uses_the_given_table_and_clips_levels() -> None:
     assert rgba.shape == (2, 3, 4)
     np.testing.assert_array_equal(rgba[0], lut[[0, 1, 2]])
     np.testing.assert_array_equal(rgba[1], lut[[4, 0, 4]])
+
+
+@pytest.mark.parametrize(
+    ("pgv", "mmi"),
+    [
+        (0.1, 3.78 - 1.47),
+        (0.05, 3.78 + 1.47 * np.log10(0.05)),
+        (2.0, 3.78 + 1.47 * np.log10(2.0)),
+    ],
+)
+def test_pgv_to_mmi_low_branch_slope(pgv: float, mmi: float) -> None:
+    """Below the break, intensity rises 1.47 per decade of PGV."""
+    assert palette.pgv_to_mmi(pgv) == pytest.approx(mmi, abs=1e-4)
+
+
+def test_pgv_to_mmi_break_belongs_to_the_lower_branch() -> None:
+    """At log10(PGV) = 0.53 exactly the lower relation applies (3.78 +
+    1.47 * 0.53), not the upper (2.89 + 3.16 * 0.53), which is 0.0057 higher.
+    """
+    # The single-precision PGV whose single-precision log10 is exactly 0.53.
+    pgv = np.float32(3.388441324234009)
+    assert np.log10(pgv) == np.float32(0.53)
+    assert palette.pgv_to_mmi(pgv) == pytest.approx(3.78 + 1.47 * 0.53, abs=1e-4)
+    # Just above the break the upper relation takes over.
+    above = np.nextafter(pgv, np.float32(10.0))
+    assert palette.pgv_to_mmi(above) == pytest.approx(2.89 + 3.16 * 0.53, abs=1e-4)
+
+
+def test_pgv_to_mmi_returns_float32_of_the_input_shape() -> None:
+    """Intensities come back as single precision whatever the input."""
+    pgv = np.array([[0.5, 5.0], [50.0, 0.0]], dtype=np.float64)
+    mmi = palette.pgv_to_mmi(pgv)
+    assert mmi.dtype == np.float32
+    assert mmi.shape == (2, 2)
+    assert palette.pgv_to_mmi([1, 10]).dtype == np.float32
+
+
+def test_colour_maps_are_named() -> None:
+    """The colour maps carry their names, as matplotlib reports them."""
+    assert palette.land_cmap().name == "land"
+    assert palette.shaking_cmap().name == "shaking"
+
+
+def test_land_cmap_runs_through_the_elevation_stops() -> None:
+    """Each stop's colour sits at its elevation over the highest stop."""
+    from matplotlib.colors import to_rgba
+
+    cmap = palette.land_cmap()
+    top = palette.LAND_STOPS[-1][0]
+    for elevation, colour in palette.LAND_STOPS:
+        np.testing.assert_allclose(cmap(elevation / top), to_rgba(colour), atol=1 / 255)
