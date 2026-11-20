@@ -276,3 +276,94 @@ def test_slip_spreads_then_gives_way_to_the_planes(sw4_run: dict[str, Path]) -> 
 
     assert _changed(0.0) > 50
     assert _changed(1.0) == 0
+
+
+def test_fault_plane_fill_brightens_inside_its_rings(sw4_run: dict[str, Path]) -> None:
+    """The planes' rings are filled white, faint while the waves play and
+    stronger on the final map; a clockwise ring inside one is a hole."""
+    settings = render.Settings(width=640, height=360, fps=4)
+    plan = plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        settings,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+    )
+    frame = next(f for f in plan.frames if f.kind == "simulation")
+
+    def _ring(x0: float, y0: float, x1: float, y1: float) -> npt.NDArray[np.float64]:
+        """A closed screen ring, anticlockwise on screen (y down)."""
+        return np.array([[x0, y0], [x0, y1], [x1, y1], [x1, y0], [x0, y0]])
+
+    outer = _ring(200.0, 120.0, 440.0, 260.0)
+    hole = _ring(290.0, 160.0, 350.0, 220.0)[::-1]
+    planes = render.FaultPlanes([outer, hole], [])
+
+    def _hud(peak: float, planes: render.FaultPlanes | None) -> npt.NDArray[np.int_]:
+        """Draw a grey frame at `peak` of the way to the final map."""
+        return render.draw_hud(
+            np.full((settings.height, settings.width, 3), 100, dtype=np.uint8),
+            plan.scene,
+            dataclasses.replace(frame, peak=peak),
+            [],
+            [],
+            np.full(2, np.nan),
+            settings,
+            scale=plan.end_card.scale,
+            planes=planes,
+        ).astype(int)
+
+    for peak, fill in ((0.0, render.PLANE_FILL), (1.0, render.FINAL_PLANE_FILL)):
+        bare, filled = _hud(peak, None), _hud(peak, planes)
+        # Inside the outer ring, white is laid over the frame at `fill`.
+        inside = bare[140, 230]
+        np.testing.assert_allclose(
+            filled[140, 230], inside + (255 - inside) * fill, atol=2
+        )
+        # The hole and the ground outside the rings are untouched.
+        np.testing.assert_array_equal(filled[190, 320], bare[190, 320])
+        np.testing.assert_array_equal(filled[300, 100], bare[300, 100])
+
+
+def test_fault_plane_edges_are_white_lines_with_a_dark_halo(
+    sw4_run: dict[str, Path],
+) -> None:
+    """The planes' outline is drawn as a light line edged with a dark halo,
+    reaching only a few pixels either side."""
+    settings = render.Settings(width=640, height=360, fps=4)
+    plan = plan_movie(
+        sw4_run["sw4_input"],
+        sw4_run["realisation"],
+        settings,
+        None,
+        None,
+        sw4_run["coastline"],
+        online=False,
+    )
+    frame = next(f for f in plan.frames if f.kind == "simulation")
+    full = render.Settings(width=1920, height=1080, fps=4)
+    edge = np.array([[600.0, 600.5], [1300.0, 600.5]])
+
+    def _hud(planes: render.FaultPlanes | None) -> npt.NDArray[np.int_]:
+        """Draw a grey full-HD frame on the final map."""
+        return render.draw_hud(
+            np.full((full.height, full.width, 3), 100, dtype=np.uint8),
+            plan.scene,
+            dataclasses.replace(frame, peak=1.0),
+            [],
+            [],
+            np.full(2, np.nan),
+            full,
+            scale=plan.end_card.scale,
+            planes=planes,
+        ).astype(int)
+
+    bare, outlined = _hud(None), _hud(render.FaultPlanes([], [edge]))
+    # On the line: much lighter than the grey.
+    assert (outlined[600, 950] - bare[600, 950]).min() > 60
+    # Just beside it: darkened by the halo.
+    assert (outlined[602, 950] - bare[602, 950]).max() < -10
+    # Far from it: untouched.
+    np.testing.assert_array_equal(outlined[700, 950], bare[700, 950])
