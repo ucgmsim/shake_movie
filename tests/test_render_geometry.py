@@ -186,6 +186,36 @@ def test_sample_count_sets_what_a_thin_wall_can_hide() -> None:
     assert not render.visible(scene, camera, target, 1.0)[0]
 
 
+def test_ground_level_with_the_sight_line_hides_the_point() -> None:
+    """Ground exactly as high as the sight line blocks it: only ground
+    strictly below the line leaves the point in view."""
+    easting, _ = _grid(100.0)
+    # The point's sight line ends 50 m above its sea-level ground, and the
+    # camera sits 50 m up, so the line is level at 50 m all the way.
+    camera = np.array([0.0, 5e3, 50.0])
+    target = np.array([[10e3, 5e3]])
+    plateau = (easting >= 3e3) & (easting <= 7e3)
+    for top, seen in ((50.0, False), (49.9, True)):
+        scene = _scene(np.where(plateau, top, 0.0))
+        assert render.visible(scene, camera, target, 1.0)[0] == seen
+
+
+def test_default_sight_line_steps() -> None:
+    """By default each sight line is tested at 40 even steps from 2 % to
+    97 % of the way: a wall only the 21st step (50.7 %) lands on hides the
+    point, and moves out of reach with one step more or less."""
+    axis = np.arange(0.0, 10e3 + 5.0, 10.0)
+    easting = np.meshgrid(axis, axis[::-1])[0]
+    # The 21st of 40 steps is at 0.02 + 20 * 0.95 / 39 = 50.72 %, 5071.8 m
+    # along; with 41 steps the nearest are at 4950 m and 5187.5 m.
+    scene = _scene(np.where((easting >= 5040.0) & (easting <= 5100.0), 1e3, 0.0))
+    camera = np.array([0.0, 5e3, 100.0])
+    target = np.array([[10e3, 5e3]])
+    assert not render.visible(scene, camera, target, 1.0)[0]
+    assert render.visible(scene, camera, target, 1.0, samples=41)[0]
+    assert render.visible(scene, camera, target, 1.0, samples=39)[0]
+
+
 # ------------------------------------------------------------ point sources
 
 
