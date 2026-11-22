@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import shapely
 
-from shake_movie import scene
+from shake_movie import palette, scene
 from shake_movie.realisation import Realisation
 from shake_movie.sw4_images import GridGeometry, read_image
 
@@ -408,3 +408,60 @@ def test_planes_too_thin_have_no_slip() -> None:
     assert scene.Slip.from_points(points, rates, [(1, 4)]) is None
     assert scene.Slip.from_points(points, rates, [(4, 1)]) is None
     assert scene.Slip.from_points(points, rates, [(2, 2)]) is not None
+
+
+def _map_slope(azimuth: float, spacing: float) -> np.ndarray:
+    """A plane on SW4's grid that rises to the south-east on the map, facing NW."""
+    i, j = np.meshgrid(np.arange(50), np.arange(60), indexing="ij")
+    x, y = i * spacing, j * spacing
+    az = np.radians(azimuth)
+    easting = x * np.sin(az) + y * np.cos(az)
+    northing = x * np.cos(az) - y * np.sin(az)
+    return ((easting - northing) * 0.2).astype(np.float32)
+
+
+@pytest.mark.parametrize("azimuth", [0.0, 30.0, 90.0, 145.0, 270.0])
+def test_hillshade_lights_slopes_from_the_north_west_on_the_map(
+    azimuth: float,
+) -> None:
+    """A NW-facing slope is lit, the SE-facing one shaded, whatever the grid's bearing."""
+    spacing = 100.0
+    facing_nw = _map_slope(azimuth, spacing)
+    lit = scene.hillshade(facing_nw, spacing, azimuth)
+    shaded = scene.hillshade(-facing_nw, spacing, azimuth)
+    flat = scene.hillshade(np.zeros_like(facing_nw), spacing, azimuth)
+
+    np.testing.assert_allclose(flat, np.sin(np.radians(scene.LIGHT_ALTITUDE)))
+    assert np.all(lit > flat)
+    assert np.all(shaded < flat)
+    np.testing.assert_allclose(
+        lit, scene.hillshade(_map_slope(0.0, spacing), spacing, 0.0), atol=1e-5
+    )
+    np.testing.assert_allclose(
+        shaded, scene.hillshade(-_map_slope(0.0, spacing), spacing, 0.0), atol=1e-5
+    )
+
+
+def test_tint_colours_sea_and_lakes() -> None:
+    """Lakes show only on land, and the sea darkens from the coast to far offshore."""
+    spacing = 1000.0
+    elevation = np.full((1, 200), 100.0, dtype=np.float32)
+    land = np.zeros((1, 200), dtype=np.float32)
+    land[:, :20] = 1.0
+    water = np.zeros((1, 200), dtype=np.float32)
+    water[:, 10] = 1.0
+    water[:, 100] = 1.0
+
+    rgb = scene.tint(elevation, land, water, None, spacing)
+    dry = scene.tint(elevation, land, np.zeros_like(water), None, spacing)
+
+    np.testing.assert_allclose(rgb[0, 10], scene.hex_rgb(palette.LAKE), atol=1e-6)
+    np.testing.assert_allclose(rgb[0, 100], dry[0, 100])
+    np.testing.assert_allclose(rgb[0, 20], scene.hex_rgb(palette.SEA_NEAR), atol=0.01)
+    assert (199 - 19) * spacing >= palette.SEA_FADE_DISTANCE
+    np.testing.assert_allclose(rgb[0, 199], scene.hex_rgb(palette.SEA_FAR), atol=1e-6)
+
+    flat = np.full_like(elevation, np.sin(np.radians(scene.LIGHT_ALTITUDE)))
+    np.testing.assert_allclose(
+        scene.tint(elevation, land, water, flat, spacing), rgb, atol=1e-6
+    )
