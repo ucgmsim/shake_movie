@@ -226,3 +226,98 @@ def test_towns_hidden_by_terrain_are_not_named() -> None:
     height[6] = 2000.0
     ridged = _scene([town], height)
     assert render.LabelPlacer(ridged, SETTINGS).place(_pitched(ridged), 1.0, 8) == []
+
+
+@pytest.mark.parametrize(
+    ("population", "tier"),
+    [(0, 0), (9_999, 0), (10_000, 1), (99_999, 1), (100_000, 2), (2_000_000, 2)],
+)
+def test_label_tiers_step_up_at_ten_and_a_hundred_thousand(
+    population: int, tier: int
+) -> None:
+    """Towns rank 0 below 10 000 people, 1 from 10 000 and 2 from 100 000."""
+    assert render._tier(population) == tier
+
+
+@dataclasses.dataclass
+class _FixedScreen:
+    """A stand-in projection that puts every town at a chosen pixel, seen
+    from high above the scene so the terrain hides none of them."""
+
+    pixels: list[tuple[float, float]]
+    position: npt.NDArray[np.float64] = dataclasses.field(
+        default_factory=lambda: np.array([5e3, 5e3, 50e3])
+    )
+
+    def __call__(self, points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """The chosen pixels, one per town."""
+        assert len(points) == len(self.pixels)
+        return np.array(self.pixels, dtype=np.float64)
+
+
+def _named_at(settings: render.Settings, pixel: tuple[float, float]) -> bool:
+    """Whether a lone town drawn at `pixel` gets a label."""
+    scene = _scene([_town("Town", 1_000, 5e3, 5e3)])
+    projector = cast(render.Projector, _FixedScreen([pixel]))
+    labels = render.LabelPlacer(scene, settings).place(projector, 1.0, 8)
+    return bool(labels)
+
+
+def test_left_margin_is_sixty_pixels_at_full_hd() -> None:
+    """At 1920 pixels wide, a town is named only strictly right of x = 60."""
+    for x, named in ((59.99, False), (60.0, False), (60.01, True), (60.5, True)):
+        assert _named_at(SETTINGS, (x, 540.0)) == named, x
+
+
+def test_margins_scale_with_the_frame_width() -> None:
+    """Margins shrink with the frame: at 960 x 540 the left margin is 30
+    pixels, the right 130, the top 100 and the bottom 75."""
+    half = render.Settings(width=960, height=540, fps=30)
+    for pixel, named in (
+        ((29.9, 270.0), False),
+        ((30.1, 270.0), True),
+        ((50.0, 270.0), True),
+        ((829.9, 270.0), True),
+        ((830.1, 270.0), False),
+        ((400.0, 99.9), False),
+        ((400.0, 100.1), True),
+        ((400.0, 464.9), True),
+        ((400.0, 465.1), False),
+    ):
+        assert _named_at(half, pixel) == named, pixel
+
+
+def test_labels_hang_sixty_metres_above_the_exaggerated_ground() -> None:
+    """A label's dot is where the ground 60 m above the town, after
+    exaggeration, lands on screen."""
+    # Ground rising 10 m per 100 m east, so it differs from point to point.
+    height = np.tile(np.arange(11) * 10.0, (11, 1))
+    town = _town("Town", 1_000, 5.5e3, 5e3)
+    scene = _scene([town], height)
+    shot = Shot(easting=5e3, northing=5e3, distance=3e3, pitch=50.0, heading=0.0)
+    projector = render.Projector(*render.camera_pose(scene, shot, 2.0), SETTINGS)
+    labels = render.LabelPlacer(scene, SETTINGS).place(projector, 2.0, 8)
+    assert len(labels) == 1
+    # The ground at the town is 55 m: exaggerated twice, plus 60 m.
+    expected = projector(np.array([[5.5e3, 5e3, 55.0 * 2.0 + 60.0]]))[0]
+    np.testing.assert_allclose(labels[0].position, expected, rtol=0, atol=1e-9)
+    # A metre higher or lower moves the dot.
+    for z in (169.0, 171.0):
+        moved = projector(np.array([[5.5e3, 5e3, z]]))[0]
+        assert np.abs(moved - expected).max() > 1e-3
+
+
+def test_towns_shown_on_the_final_map_keep_their_place_after_it() -> None:
+    """Towns outside the domain, never considered on the final map, are
+    newcomers afterwards: a larger one overlapping a town already showing
+    does not take its place."""
+    inside = _town("Inside", 2_000, 7.95e3, 5e3)
+    outside = _town("Outside", 500_000, 8.05e3, 5e3)
+    scene = _scene([outside, inside])
+    placer = render.LabelPlacer(scene, SETTINGS)
+    projector = _projector(scene, distance=12e3)
+    words: dict[str, str | None] = {"Inside": "Weak", "Outside": "Strong"}
+    assert _names(_settle(placer, projector, 8, words)) == {"Inside"}
+    labels = placer.place(projector, 1.0, 8)
+    assert _names(labels) == {"Inside"}
+    assert labels[0].alpha == 1.0
