@@ -6,12 +6,15 @@ Gaussian hill at (x, y) = (14, 33) km and a point source at (22, 17) km).
 SW4's own `lat` and `lon` images pin down the georeferencing.
 """
 
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from pathlib import Path
+from typing import ClassVar, Self
 
 import fake_sw4
 import h5py
 import hdf5plugin
 import numpy as np
+import numpy.typing as npt
 import pytest
 from pyproj import Transformer
 
@@ -413,3 +416,135 @@ def test_image_sequence_maximum_in_workers(
     np.testing.assert_array_equal(sequence.maximum(workers=3), serial)
     expected = np.max([sw4_images.read_image(path).values for path in paths], axis=0)
     np.testing.assert_array_equal(serial, expected)
+
+
+def test_unknown_unavailable_filter_is_named_by_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing filter SW4 is not known to use is named by its id, and the
+    error names the file and says how to get the filter."""
+    path = _write_grid(tmp_path, 1, 0.0, shape=(3, 4))
+    with h5py.File(path, "r+") as handle:
+        values = handle["patches"][:].reshape((4, 3))
+        del handle["patches"]
+        handle.create_dataset("patch0", data=values, chunks=True, compression="gzip")
+    monkeypatch.setattr(h5py.h5z, "filter_avail", lambda code: code != 1)
+    with pytest.raises(OSError) as error:
+        sw4_images.read_image(path)
+    assert str(error.value) == (
+        f"{path} is compressed with HDF5 filter 1 (filter id 1), which this"
+        " HDF5 cannot decompress. Install hdf5plugin with that filter, or"
+        " set HDF5_PLUGIN_PATH to a directory holding it."
+    )
+
+
+def test_image_sequence_with_mismatched_times_message(tmp_path: Path) -> None:
+    """Too many times for the images is refused with the exact reason."""
+    paths = [_write_ramp(tmp_path, cycle, float(cycle)) for cycle in range(2)]
+    with pytest.raises(
+        ValueError, match=r"^An image sequence needs one time per image\.$"
+    ):
+        sw4_images.ImageSequence(paths, [0.0, 1.0, 2.0])
+
+
+def test_image_sequence_times_are_float64(tmp_path: Path) -> None:
+    """Known times given as integers are kept as float64 seconds."""
+    paths = [_write_ramp(tmp_path, cycle, float(cycle)) for cycle in range(3)]
+    sequence = sw4_images.ImageSequence(paths, [2, 0, 1])
+    assert sequence.times.dtype == np.float64
+    np.testing.assert_array_equal(sequence.times, [0.0, 1.0, 2.0])
+    assert sequence.paths == [paths[1], paths[2], paths[0]]
+
+
+def test_image_sequence_at_a_repeated_first_time(tmp_path: Path) -> None:
+    """When the first two images share a time, sampling at (or before) it
+    gives the first image rather than dividing by a zero time step."""
+    paths = [
+        _write_ramp(tmp_path, cycle, time) for cycle, time in enumerate((0.0, 0.0, 1.0))
+    ]
+    # Distinguish the two images at t = 0 by their values.
+    with h5py.File(paths[1], "r+") as handle:
+        handle["patches"][...] = handle["patches"][...] + 5.0
+    sequence = sw4_images.ImageSequence(paths)
+    first = sw4_images.read_image(paths[0]).values
+    for time in (0.0, -1.0):
+        sample = sequence.at(time)
+        assert np.all(np.isfinite(sample))
+        np.testing.assert_array_equal(sample, first)
+
+
+class _InProcessPool:
+    """A stand-in for a process pool that runs work here and records its size."""
+
+    sizes: ClassVar[list[int]] = []
+    parts: ClassVar[list[list[Path]]] = []
+
+    def __init__(self, processes: int) -> None:
+        assert isinstance(processes, int)
+        self.sizes.append(processes)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def imap_unordered(
+        self,
+        function: Callable[[Sequence[Path]], npt.NDArray[np.float32]],
+        parts: Iterable[Sequence[Path]],
+    ) -> Iterator[npt.NDArray[np.float32]]:
+        for part in parts:
+            self.parts.append(list(part))
+            yield function(part)
+
+
+class _InProcessContext:
+    Pool = _InProcessPool
+
+
+@pytest.fixture
+def in_process_pool(monkeypatch: pytest.MonkeyPatch) -> type[_InProcessPool]:
+    """Replace the worker pool with one that records its size and parts."""
+    _InProcessPool.sizes = []
+    _InProcessPool.parts = []
+    monkeypatch.setattr(sw4_images, "get_context", lambda method: _InProcessContext)
+    return _InProcessPool
+
+
+def test_image_sequence_maximum_worker_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    in_process_pool: type[_InProcessPool],
+) -> None:
+    """By default, and when there are too few images per worker, the maximum
+    is read here; otherwise images are split evenly over whole workers."""
+    rng = np.random.default_rng(2)
+    paths = [
+        fake_sw4.write_image(
+            tmp_path, "surf_mag", "mag", cycle, 0.1 * cycle, rng.random((4, 5)), SPACING
+        )
+        for cycle in range(5)
+    ]
+    expected = np.max([sw4_images.read_image(path).values for path in paths], axis=0)
+    sequence = sw4_images.ImageSequence(paths)
+    monkeypatch.setattr(sw4_images, "MAXIMUM_IMAGES_PER_WORKER", 1)
+
+    # The default, and an explicit 1, read in this process.
+    np.testing.assert_array_equal(sequence.maximum(), expected)
+    np.testing.assert_array_equal(sequence.maximum(workers=1), expected)
+    assert in_process_pool.sizes == []
+
+    # 3 images do not fill two workers at 2 images each: read here.
+    monkeypatch.setattr(sw4_images, "MAXIMUM_IMAGES_PER_WORKER", 2)
+    short = sw4_images.ImageSequence(paths[:3])
+    np.testing.assert_array_equal(
+        short.maximum(workers=4),
+        np.max([sw4_images.read_image(p).values for p in paths[:3]], axis=0),
+    )
+    assert in_process_pool.sizes == []
+
+    # 5 images at 2 per worker make 2 workers, not 2.5, nor the 3 asked for.
+    np.testing.assert_array_equal(sequence.maximum(workers=3), expected)
+    assert in_process_pool.sizes == [2]
+    assert in_process_pool.parts == [paths[:2], paths[2:]]
