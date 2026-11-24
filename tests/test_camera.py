@@ -96,3 +96,59 @@ def test_blend_takes_the_short_way_round() -> None:
     middle = camera.blend(a, b, 0.5)
     assert middle.heading % 360 == pytest.approx(0.0)
     assert middle.distance == pytest.approx(1e4)
+
+
+def test_blend_eases_every_field_from_a_to_b() -> None:
+    """Blending starts on `a`, ends on `b` and passes the smoothstep point
+    between them, for shots away from the origin."""
+    a = camera.Shot(1.5e6, 5.2e6, 2e3, 40.0, 30.0)
+    b = camera.Shot(1.6e6, 5.1e6, 8e3, 60.0, 90.0)
+    start, end = camera.blend(a, b, 0.0), camera.blend(a, b, 1.0)
+    for name in ("easting", "northing", "distance", "pitch", "heading"):
+        assert getattr(start, name) == pytest.approx(getattr(a, name))
+        assert getattr(end, name) == pytest.approx(getattr(b, name))
+    # Smoothstep at s = 0.25 is 0.15625.
+    quarter = camera.blend(a, b, 0.25)
+    eased = 0.15625
+    assert quarter.easting == pytest.approx(1.5e6 + 1e5 * eased)
+    assert quarter.northing == pytest.approx(5.2e6 - 1e5 * eased)
+    assert quarter.distance == pytest.approx(2e3 * 4**eased)
+    assert quarter.pitch == pytest.approx(40.0 + 20.0 * eased)
+    assert quarter.heading == pytest.approx(30.0 + 60.0 * eased)
+
+
+def test_fit_distance_matches_the_field_of_view() -> None:
+    """The distance puts the ground's edges exactly on the frame's edges."""
+    half_v = np.radians(camera.VERTICAL_FOV) / 2
+    # Width-limited: a wide frame, shallow ground.
+    aspect = 2.0
+    half_h = np.arctan(np.tan(half_v) * aspect)
+    assert camera.fit_distance(1e4, 1.0, 40.0, aspect) == pytest.approx(
+        5e3 / np.tan(half_h)
+    )
+    assert camera.fit_distance(1e4, 1.0, 40.0, aspect) == pytest.approx(
+        5e3 / (2 * np.tan(np.radians(15.0)))
+    )
+    # Depth-limited: narrow width, deep ground seen at 30 degrees.
+    assert camera.fit_distance(1.0, 1e4, 30.0, 1.0) == pytest.approx(
+        1e4 * 0.5 / 2 / np.tan(np.radians(15.0))
+    )
+    # Looking straight down, depth counts in full.
+    assert camera.fit_distance(1.0, 1e4, 90.0, 1.0) == pytest.approx(
+        5e3 / np.tan(np.radians(15.0))
+    )
+
+
+def test_extents_centre_and_size_for_rotated_heading() -> None:
+    """The bounding box is measured along the screen's axes and centred on
+    the points, away from the origin."""
+    points = np.array([[1.5e6, 5.2e6], [1.6e6, 5.2e6], [1.5e6, 5.25e6]])
+    centre, width, depth = camera.extents(points, 0.0)
+    np.testing.assert_allclose(centre, [1.55e6, 5.225e6])
+    assert width == pytest.approx(1e5)
+    assert depth == pytest.approx(5e4)
+    # Facing east, screen-right is south and into the screen is east.
+    centre, width, depth = camera.extents(points, 90.0)
+    np.testing.assert_allclose(centre, [1.55e6, 5.225e6])
+    assert width == pytest.approx(5e4)
+    assert depth == pytest.approx(1e5)
