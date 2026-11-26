@@ -3,6 +3,7 @@
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import fake_sw4
 import h5py
@@ -15,7 +16,7 @@ from conftest import write_measures
 from matplotlib.axes import Axes
 from matplotlib.text import Text
 
-from shake_movie import cli, palette, render, sw4_images
+from shake_movie import cli, palette, render, scene, sw4_images
 from shake_movie.cli import plan_movie
 from shake_movie.realisation import Realisation
 from shake_movie.sw4_images import GridGeometry, ImageSequence, read_image
@@ -448,3 +449,50 @@ def test_still_run_keeps_a_usable_scale(sw4_run: dict[str, Path]) -> None:
     assert plan.end_card.scale.high == 1.0
     land = plan.scene.wave_opacity >= 1.0
     np.testing.assert_array_equal(plan.end_card.pgv[land], 0.0)
+
+
+def test_town_words_name_the_shaking_at_each_town(geometry: GridGeometry) -> None:
+    """Each town inside the domain is given the word for the shaking at its
+    nearest shaking texture pixel, edges included; towns off the texture or
+    outside the domain get no word."""
+    stride, spacing = 2, 1000.0
+    # Texture pixel (i, j) sits at SW4 grid (2 i, 2 j) km.
+    mmi = np.array(
+        [
+            [3.2, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 4.5, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 6.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 7.9, 8.4],
+        ],
+        np.float32,
+    )
+    inside = np.ones(mmi.shape, bool)
+    inside[2, 2] = False
+
+    def _town(name: str, x: float, y: float) -> scene.Town:
+        """A town at SW4 grid coordinates (m)."""
+        easting, northing = geometry.to_nztm(x, y)
+        return scene.Town(name, 1000, float(easting), float(northing))
+
+    towns = [
+        _town("Corner", 0.0, 0.0),
+        _town("Near", 2.3e3, 1.8e3),
+        _town("Outside", 4e3, 4e3),
+        _town("Last row", 8e3, 8e3),
+        _town("Far corner", 8e3, 10e3),
+        _town("Calm", 6e3, 2e3),
+        _town("Past x", 10e3, 2e3),
+        _town("Past y", 2e3, 12e3),
+        _town("Before", -2e3, 2e3),
+        _town("Below", 2e3, -2e3),
+    ]
+    fake = SimpleNamespace(wave_stride=stride, towns=towns, wave_inside=inside)
+    words = cli._town_words(fake, geometry, spacing, mmi)  # ty: ignore[invalid-argument-type]  # a stand-in scene with just the fields used
+    assert words == {
+        "Corner": "Weak",
+        "Near": "Light",
+        "Last row": "Severe",
+        "Far corner": "Extreme",
+        "Calm": None,
+    }
