@@ -372,3 +372,104 @@ def test_reverse_geocode_wording(
     """The two most local names are joined once each; nothing local gives None."""
     monkeypatch.setattr(naming, "_get_json", lambda url, accept="": document)
     assert naming.reverse_geocode(172.6, -42.5) == text
+
+
+def test_reverse_geocode_names_a_village(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A village counts as the most local name, ahead of its district."""
+    document = {
+        "address": {
+            "village": "Cheviot",
+            "county": "Hurunui District",
+            "state": "Canterbury",
+        }
+    }
+    monkeypatch.setattr(naming, "_get_json", lambda url, accept="": document)
+    assert naming.reverse_geocode(173.27, -42.81) == "Cheviot, Hurunui District"
+
+
+SPREAD_TOWNS = [
+    Town("Masterton", 20900, 1824000.0, 5465000.0),
+    Town("Westville", 5000, 1810000.0, 5465000.0),
+    Town("Southburn", 5000, 1824000.0, 5440000.0),
+]
+
+
+@pytest.mark.parametrize(
+    ("point", "text"),
+    [
+        ((1824000.0, 5469000.0), "4 km north of Masterton"),
+        ((1810000.0, 5469000.0), "4 km north of Westville"),
+        ((1824000.0, 5436000.0), "4 km south of Southburn"),
+        ((1806000.0, 5465000.0), "4 km west of Westville"),
+    ],
+)
+def test_nearest_town_is_the_closest(point: tuple[float, float], text: str) -> None:
+    """The place is given from whichever town is closest in both directions."""
+    assert naming.nearest_town(np.array(point), SPREAD_TOWNS) == text
+
+
+@pytest.mark.parametrize(
+    ("population", "text"),
+    [(1000, "10 km east of Ruralton"), (999, "Near Hamlet")],
+)
+def test_nearest_town_prefers_towns_of_a_thousand(population: int, text: str) -> None:
+    """Towns of 1000 people or more are preferred over closer, smaller ones."""
+    towns = [
+        Town("Ruralton", population, 1814000.0, 5465000.0),
+        Town("Hamlet", 50, 1824000.0, 5465000.0),
+    ]
+    assert naming.nearest_town(np.array([1824000.0, 5465000.0]), towns) == text
+
+
+def test_nearest_town_among_only_small_towns() -> None:
+    """With no sizeable town, the nearest small town is used."""
+    towns = [
+        Town("Hamlet", 50, 1824000.0, 5465000.0),
+        Town("Farside", 200, 1900000.0, 5465000.0),
+    ]
+    point = np.array([1824000.0, 5459000.0])
+    assert naming.nearest_town(point, towns) == "6 km south of Hamlet"
+
+
+@pytest.mark.parametrize(
+    ("distance", "text"),
+    [
+        (2999.0, "Near Masterton"),
+        (3000.0, "3 km north of Masterton"),
+        (12510.0, "13 km north of Masterton"),
+        (12490.0, "12 km north of Masterton"),
+        (19400.0, "19 km north of Masterton"),
+        (21000.0, "20 km north of Masterton"),
+        (23000.0, "25 km north of Masterton"),
+    ],
+)
+def test_nearest_town_distance_rounding(distance: float, text: str) -> None:
+    """Under 3 km is "near"; then whole km, and 5 km steps from 20 km."""
+    point = np.array([1824000.0, 5465000.0 + distance])
+    assert naming.nearest_town(point, TOWNS) == text
+
+
+@pytest.mark.parametrize(
+    ("bearing", "direction"),
+    [
+        (0.0, "north"),
+        (22.0, "north"),
+        (23.0, "north-east"),
+        (67.0, "north-east"),
+        (68.0, "east"),
+        (157.0, "south-east"),
+        (203.0, "south-west"),
+        (292.0, "west"),
+        (293.0, "north-west"),
+        (337.0, "north-west"),
+        (338.0, "north"),
+        (340.0, "north"),
+    ],
+)
+def test_nearest_town_compass_points(bearing: float, direction: str) -> None:
+    """Bearings fall in 45-degree sectors centred on each compass point."""
+    angle = np.radians(bearing)
+    point = np.array(
+        [1824000.0 + 10000.0 * np.sin(angle), 5465000.0 + 10000.0 * np.cos(angle)]
+    )
+    assert naming.nearest_town(point, TOWNS) == f"10 km {direction} of Masterton"
